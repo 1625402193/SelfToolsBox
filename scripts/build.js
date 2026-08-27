@@ -39,7 +39,8 @@ async function buildEdition(editionName, retryCount = 0) {
   console.log('Running vite build...')
   execSync('npx vite build', { cwd: projectDir, stdio: 'inherit', env: { ...process.env, VITE_EDITION: editionName } })
 
-  const outputDir = path.resolve('D:/Tool/tools_release', editionName)
+  // 输出到项目内 release/<edition> 目录（已在 .gitignore 中排除，仅 exe 手动上传 Release）
+  const outputDir = path.resolve(projectDir, 'release', editionName)
   console.log(`Cleaning output directory: ${outputDir}`)
   if (fs.existsSync(outputDir)) {
     try { fs.rmSync(outputDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 2000 }) } catch (e) { console.log('  Warning: clean failed, continuing...') }
@@ -106,7 +107,7 @@ async function main() {
     }
     console.log('\n🎉 All builds completed successfully!')
     console.log('Output files:')
-    const releaseDir = path.resolve('D:/Tool/tools_release')
+    const releaseDir = path.resolve(projectDir, 'release')
     if (fs.existsSync(releaseDir)) {
       const editions = fs.readdirSync(releaseDir)
       for (const ed of editions) {
@@ -117,7 +118,7 @@ async function main() {
             const fPath = path.resolve(edDir, f)
             if (!fPath.includes('win-unpacked')) {
               const stat = fs.statSync(fPath)
-              console.log(`  📦 D:/Tool/tools_release/${ed}/${f} (${(stat.size / 1024 / 1024).toFixed(1)} MB)`)
+              console.log(`  📦 release/${ed}/${f} (${(stat.size / 1024 / 1024).toFixed(1)} MB)`)
             }
           }
         }

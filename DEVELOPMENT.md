@@ -247,7 +247,7 @@ npm run electron:dev
    a. 设置环境变量 VITE_EDITION
    b. 执行 npx vite build（构建前端）
    c. 等待 5 秒（避免 Windows Defender 文件锁）
-   d. 清理输出目录 D:/Tool/tools_release/{edition}/
+   d. 清理输出目录 release/{edition}/
    e. 调用 electron-builder --config=electron-builder-{edition}.json
    f. 失败自动重试（最多 3 次，间隔 10 秒）
 3. 输出所有生成的 exe 文件路径
@@ -255,10 +255,15 @@ npm run electron:dev
 
 ### 输出目录
 
+打包产物输出到项目内 `release/` 目录（已在 `.gitignore` 中排除，不纳入版本管理）：
+
 | 版本 | 输出位置 |
 |------|----------|
-| 全能版 | `D:/Tool/tools_release/full/多功能工具箱-全能版 {version}.exe` |
-| 工作版 | `D:/Tool/tools_release/work/多功能工具箱-工作版 {version}.exe` |
+| 全能版 | `release/full/多功能工具箱-全能版 {version}.exe` |
+| 工作版 | `release/work/多功能工具箱-工作版 {version}.exe` |
+| 普通版 | `release/normal/多功能工具箱-普通版 {version}.exe` |
+
+分发方式：上传到 GitHub Releases 作为附件（文件名改为英文，避免中文 URL 编码问题），并在 `README.md` 中更新下载链接。
 
 ### 打包配置差异
 
@@ -428,8 +433,9 @@ A: `screen:getBounds` 返回所有显示器的合并边界，坐标计算需考�
    - 日期 = 今天 → 询问用户是否递增；不递增则跳过第 2 步的新建条目（追加到今天的条目中即可）
 2. 更新 `package.json` 中的 `version` 字段，并在 `CHANGELOG.md` 顶部追加/补充本次变更记录
 3. 运行 `node scripts/build.js all` 打包全部版本
-4. 输出的 exe 在 `D:/Tool/tools_release/` 下（full / normal / work 三个子目录）
-5. 分发对应版本的 exe 文件给用户
+4. 输出的 exe 在项目内 `release/` 下（full / normal / work 三个子目录）
+5. 创建 GitHub Release（tag 为 `v{version}`），上传三个 exe 作为附件（改英文名）
+6. 更新 `README.md` 顶部的下载链接指向新版本
 
 ---
 

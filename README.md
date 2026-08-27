@@ -4,13 +4,25 @@
 
 ---
 
-## 📥 安装与启动
+## 📥 下载
 
-- 直接双击运行 `多功能工具箱.exe` 即可使用，无需安装。
-- 程序启动后默认置顶显示。
-- 提供两个版本：
-  - **全能版** — 包含所有功能
-  - **工作版** — 专注办公效率，隐藏"文件分类"和"批量移动"功能
+最新版本：**v1.1.0**（Windows x64 便携版，下载后双击即可运行，无需安装）
+
+| 版本 | 下载 | 包含功能 |
+|------|------|----------|
+| **全能版** | [ToolBox-Full-1.1.0.exe](https://github.com/1625402193/SelfToolsBox/releases/download/v1.1.0/ToolBox-Full-1.1.0.exe) | 全部功能 |
+| **工作版** | [ToolBox-Work-1.1.0.exe](https://github.com/1625402193/SelfToolsBox/releases/download/v1.1.0/ToolBox-Work-1.1.0.exe) | 日报周报、截图录屏、自动点击、定时任务 |
+| **普通版** | [ToolBox-Normal-1.1.0.exe](https://github.com/1625402193/SelfToolsBox/releases/download/v1.1.0/ToolBox-Normal-1.1.0.exe) | 文件分类、批量移动、媒体评分、截图录屏、自动点击 |
+
+> 所有版本请见 [Releases 页面](https://github.com/1625402193/SelfToolsBox/releases)
+
+---
+
+## 🚀 启动说明
+
+- 双击 exe 即可使用，无需安装。
+- 程序启动后默认置顶显示，可在左侧栏底部或菜单栏「窗口 → 窗口置顶」关闭。
+- 首次运行会在用户目录下创建配置文件保存你的设置。
 
 ---
 
