@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body {
+  width: 100vw; height: 100vh;
+  overflow: hidden;
+  /* 使用 rgba 但 alpha > 0 即可正常接收鼠标事件 */
+  background: rgba(0, 0, 0, 0.35);
+  cursor: crosshair;
+  user-select: none;
+  -webkit-app-region: no-drag;
+}
+#rect {
+  position: fixed;
+  border: 2px solid #1890ff;
+  background: rgba(24, 144, 255, 0.18);
+  display: none;
+  z-index: 10;
+  pointer-events: none;
+}
+/* 调整模式下的选区样式 */
+#rect.adjustable {
+  cursor: move;
+  pointer-events: auto;
+}
+/* 8个调整手柄 */
+.handle {
+  position: absolute;
+  width: 10px; height: 10px;
+  background: #fff;
+  border: 2px solid #1890ff;
+  border-radius: 2px;
+  display: none;
+  z-index: 15;
+}
+#rect.adjustable .handle { display: block; }
+.handle-tl { top: -5px; left: -5px; cursor: nw-resize; }
+.handle-tc { top: -5px; left: 50%; margin-left: -5px; cursor: n-resize; }
+.handle-tr { top: -5px; right: -5px; cursor: ne-resize; }
+.handle-ml { top: 50%; margin-top: -5px; left: -5px; cursor: w-resize; }
+.handle-mr { top: 50%; margin-top: -5px; right: -5px; cursor: e-resize; }
+.handle-bl { bottom: -5px; left: -5px; cursor: sw-resize; }
+.handle-bc { bottom: -5px; left: 50%; margin-left: -5px; cursor: s-resize; }
+.handle-br { bottom: -5px; right: -5px; cursor: se-resize; }
+#info {
+  position: fixed;
+  top: 24px; left: 50%;
+  transform: translateX(-50%);
+  background: rgba(0, 0, 0, 0.75);
+  color: #fff;
+  padding: 10px 20px;
+  border-radius: 6px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 14px;
+  pointer-events: none;
+  white-space: nowrap;
+  z-index: 20;
+}
+/* 确认按钮 */
+#confirm-btn {
+  position: fixed;
+  display: none;
+  padding: 6px 18px;
+  background: #1890ff;
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  font-size: 14px;
+  cursor: pointer;
+  z-index: 25;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+}
+#confirm-btn:hover { background: #40a9ff; }
+</style>
+</head>
+<body>
+<div id="rect">
+  <div class="handle handle-tl" data-dir="tl"></div>
+  <div class="handle handle-tc" data-dir="tc"></div>
+  <div class="handle handle-tr" data-dir="tr"></div>
+  <div class="handle handle-ml" data-dir="ml"></div>
+  <div class="handle handle-mr" data-dir="mr"></div>
+  <div class="handle handle-bl" data-dir="bl"></div>
+  <div class="handle handle-bc" data-dir="bc"></div>
+  <div class="handle handle-br" data-dir="br"></div>
+</div>
+<div id="info">按住鼠标左键拖拽框选区域，松开后可调整，按 Enter 确认，ESC 取消</div>
+<button id="confirm-btn">✓ 确认选区</button>
+<script>
+const rect = document.getElementById('rect');
+const info = document.getElementById('info');
+const confirmBtn = document.getElementById('confirm-btn');
+
+// 状态：drawing(拖拽绘制) / adjusting(调整) / idle(初始)
+let state = 'idle';
+let startX = 0, startY = 0;
+
+// 当前选区（绝对像素坐标）
+let regionX = 0, regionY = 0, regionW = 0, regionH = 0;
+
+// 调整相关
+let adjustDir = ''; // 调整方向：tl/tc/tr/ml/mr/bl/bc/br/move
+let adjustStartX = 0, adjustStartY = 0;
+let adjustOrigX = 0, adjustOrigY = 0, adjustOrigW = 0, adjustOrigH = 0;
+
+function updateRect() {
+  rect.style.left = regionX + 'px';
+  rect.style.top = regionY + 'px';
+  rect.style.width = regionW + 'px';
+  rect.style.height = regionH + 'px';
+}
+
+function updateInfo() {
+  if (state === 'adjusting') {
+    info.textContent = `(${regionX}, ${regionY}) ${regionW} x ${regionH} — 拖拽边角调整，Enter/双击确认，ESC取消`;
+  }
+}
+
+function showConfirmBtn() {
+  // 按钮放在选区下方居中
+  const btnX = regionX + regionW / 2 - 45;
+  const btnY = regionY + regionH + 10;
+  confirmBtn.style.left = btnX + 'px';
+  confirmBtn.style.top = (btnY > window.innerHeight - 40 ? regionY - 36 : btnY) + 'px';
+  confirmBtn.style.display = 'block';
+}
+
+function enterAdjustMode() {
+  state = 'adjusting';
+  rect.classList.add('adjustable');
+  document.body.style.cursor = 'default';
+  updateInfo();
+  showConfirmBtn();
+}
+
+function confirmRegion() {
+  if (regionW > 5 && regionH > 5) {
+    window.regionAPI.finish({ x: regionX, y: regionY, width: regionW, height: regionH });
+  }
+}
+
+// --- 鼠标事件 ---
+document.addEventListener('mousedown', (e) => {
+  if (e.button !== 0) return;
+
+  if (state === 'idle') {
+    // 开始绘制新选区
+    startX = e.clientX;
+    startY = e.clientY;
+    state = 'drawing';
+    rect.classList.remove('adjustable');
+    confirmBtn.style.display = 'none';
+    rect.style.display = 'block';
+    regionX = startX; regionY = startY; regionW = 0; regionH = 0;
+    updateRect();
+    info.textContent = `开始拖拽...`;
+  } else if (state === 'adjusting') {
+    // 判断是否点击了手柄或选区内部
+    const target = e.target;
+    if (target.classList.contains('handle')) {
+      // 开始调整大小
+      adjustDir = target.dataset.dir;
+      adjustStartX = e.clientX;
+      adjustStartY = e.clientY;
+      adjustOrigX = regionX; adjustOrigY = regionY;
+      adjustOrigW = regionW; adjustOrigH = regionH;
+      e.stopPropagation();
+    } else if (e.clientX >= regionX && e.clientX <= regionX + regionW &&
+               e.clientY >= regionY && e.clientY <= regionY + regionH) {
+      // 点击选区内部 → 移动
+      adjustDir = 'move';
+      adjustStartX = e.clientX;
+      adjustStartY = e.clientY;
+      adjustOrigX = regionX; adjustOrigY = regionY;
+      adjustOrigW = regionW; adjustOrigH = regionH;
+    } else {
+      // 点击选区外部 → 重新绘制
+      state = 'idle';
+      rect.classList.remove('adjustable');
+      confirmBtn.style.display = 'none';
+      rect.style.display = 'none';
+      // 重新触发绘制
+      startX = e.clientX;
+      startY = e.clientY;
+      state = 'drawing';
+      rect.style.display = 'block';
+      regionX = startX; regionY = startY; regionW = 0; regionH = 0;
+      updateRect();
+    }
+  }
+});
+
+document.addEventListener('mousemove', (e) => {
+  if (state === 'drawing') {
+    regionX = Math.min(startX, e.clientX);
+    regionY = Math.min(startY, e.clientY);
+    regionW = Math.abs(e.clientX - startX);
+    regionH = Math.abs(e.clientY - startY);
+    updateRect();
+    info.textContent = `(${regionX}, ${regionY}) ${regionW} x ${regionH} — 松开后可调整`;
+  } else if (state === 'adjusting' && adjustDir) {
+    const dx = e.clientX - adjustStartX;
+    const dy = e.clientY - adjustStartY;
+
+    if (adjustDir === 'move') {
+      regionX = adjustOrigX + dx;
+      regionY = adjustOrigY + dy;
+    } else {
+      // 调整大小
+      if (adjustDir.includes('l')) {
+        regionX = adjustOrigX + dx;
+        regionW = adjustOrigW - dx;
+      }
+      if (adjustDir.includes('r')) {
+        regionW = adjustOrigW + dx;
+      }
+      if (adjustDir.includes('t')) {
+        regionY = adjustOrigY + dy;
+        regionH = adjustOrigH - dy;
+      }
+      if (adjustDir.includes('b')) {
+        regionH = adjustOrigH + dy;
+      }
+      // 防止负尺寸
+      if (regionW < 10) { regionW = 10; }
+      if (regionH < 10) { regionH = 10; }
+    }
+    updateRect();
+    updateInfo();
+    showConfirmBtn();
+  }
+});
+
+document.addEventListener('mouseup', (e) => {
+  if (state === 'drawing') {
+    regionX = Math.min(startX, e.clientX);
+    regionY = Math.min(startY, e.clientY);
+    regionW = Math.abs(e.clientX - startX);
+    regionH = Math.abs(e.clientY - startY);
+
+    if (regionW > 3 && regionH > 3) {
+      // 进入调整模式
+      updateRect();
+      enterAdjustMode();
+    } else {
+      info.textContent = `区域太小，请重新拖拽`;
+      rect.style.display = 'none';
+      state = 'idle';
+    }
+  } else if (state === 'adjusting') {
+    adjustDir = '';
+  }
+});
+
+// 双击确认
+document.addEventListener('dblclick', (e) => {
+  if (state === 'adjusting') {
+    if (e.clientX >= regionX && e.clientX <= regionX + regionW &&
+        e.clientY >= regionY && e.clientY <= regionY + regionH) {
+      confirmRegion();
+    }
+  }
+});
+
+// 确认按钮 - 阻止 mousedown 冒泡（防止触发重绘）
+confirmBtn.addEventListener('mousedown', (e) => {
+  e.stopPropagation();
+  e.preventDefault();
+});
+confirmBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  confirmRegion();
+});
+
+// 键盘事件
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    window.regionAPI.cancel();
+  } else if (e.key === 'Enter') {
+    if (state === 'adjusting') {
+      confirmRegion();
+    }
+  }
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+* { margin: 0; padding: 0; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: transparent; }
+.dot {
+  position: absolute;
+  top: 50%; left: 50%;
+  transform: translate(-50%, -50%);
+  width: 14px; height: 14px;
+  border-radius: 50%;
+  background: #ff2020;
+  box-shadow: 0 0 12px 4px rgba(255, 32, 32, 0.8);
+  animation: dot-pulse 0.5s ease-out forwards;
+}
+.ring1 {
+  position: absolute;
+  top: 50%; left: 50%;
+  transform: translate(-50%, -50%);
+  width: 10px; height: 10px;
+  border-radius: 50%;
+  border: 4px solid #ff2020;
+  box-shadow: 0 0 8px rgba(255, 32, 32, 0.6);
+  animation: ripple1 0.6s ease-out forwards;
+}
+.ring2 {
+  position: absolute;
+  top: 50%; left: 50%;
+  transform: translate(-50%, -50%);
+  width: 10px; height: 10px;
+  border-radius: 50%;
+  border: 3px solid #ff6b00;
+  box-shadow: 0 0 6px rgba(255, 107, 0, 0.5);
+  animation: ripple2 0.7s 0.1s ease-out forwards;
+  opacity: 0;
+}
+.ring3 {
+  position: absolute;
+  top: 50%; left: 50%;
+  transform: translate(-50%, -50%);
+  width: 10px; height: 10px;
+  border-radius: 50%;
+  border: 2px solid #ffaa00;
+  box-shadow: 0 0 4px rgba(255, 170, 0, 0.4);
+  animation: ripple3 0.8s 0.2s ease-out forwards;
+  opacity: 0;
+}
+@keyframes dot-pulse {
+  0% { transform: translate(-50%, -50%) scale(1); opacity: 1; }
+  50% { transform: translate(-50%, -50%) scale(1.8); opacity: 0.9; }
+  100% { transform: translate(-50%, -50%) scale(0.5); opacity: 0; }
+}
+@keyframes ripple1 {
+  0% { width: 10px; height: 10px; opacity: 1; border-width: 4px; }
+  100% { width: 70px; height: 70px; opacity: 0; border-width: 2px; }
+}
+@keyframes ripple2 {
+  0% { width: 10px; height: 10px; opacity: 0.9; border-width: 3px; }
+  100% { width: 90px; height: 90px; opacity: 0; border-width: 1px; }
+}
+@keyframes ripple3 {
+  0% { width: 10px; height: 10px; opacity: 0.8; border-width: 2px; }
+  100% { width: 110px; height: 110px; opacity: 0; border-width: 1px; }
+}
+</style>
+</head>
+<body>
+<div class="dot"></div>
+<div class="ring1"></div>
+<div class="ring2"></div>
+<div class="ring3"></div>
+<script>
+setTimeout(() => window.close(), 850);
+</script>
+</body>
+</html>

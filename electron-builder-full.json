@@ -1,0 +1,37 @@
+{
+  "appId": "com.tools.file-classifier",
+  "productName": "多功能工具箱",
+  "directories": {
+    "output": "release/full"
+  },
+  "files": [
+    "dist/**/*",
+    "electron/**/*",
+    "!node_modules"
+  ],
+  "extraResources": [
+    {
+      "from": "electron/data",
+      "to": "data"
+    }
+  ],
+  "win": {
+    "target": [
+      {
+        "target": "portable",
+        "arch": ["x64"]
+      }
+    ],
+    "icon": "public/icon.png",
+    "executableName": "ToolBox"
+  },
+  "nsis": {
+    "oneClick": false,
+    "allowToChangeInstallationDirectory": true,
+    "createDesktopShortcut": true,
+    "shortcutName": "多功能工具箱"
+  },
+  "portable": {
+    "artifactName": "多功能工具箱-全能版 ${version}.${ext}"
+  }
+}

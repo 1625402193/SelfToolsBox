@@ -1,0 +1,33 @@
+# 依赖
+node_modules/
+
+# 构建产物
+dist/
+release/
+release2/
+publish/
+
+# 打包日志
+*.log
+*.err
+build-*.log
+build-*.err
+
+# 编辑器 / 系统
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# 临时文件
+$null
+*.tmp
+*.asar
+
+# 日报/周报/月报数据（个人工作记录，不纳入版本管理）
+# 注：目录本身通过 .gitkeep 保留，程序首次运行会自动创建缺失的 txt
+electron/data/*.txt
+
+# CodeBuddy 本地数据（notes.md 保留，其余本地缓存忽略）
+.codebuddy/teams/
+.codebuddy/automations/
