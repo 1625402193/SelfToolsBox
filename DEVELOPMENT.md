@@ -42,14 +42,15 @@ d:/Tool/tools/
 │   ├── pages/                     # 功能页面
 │   │   ├── FileClassify.tsx       # 文件分类
 │   │   ├── BatchMove.tsx          # 批量移动
+│   │   ├── MediaRating.tsx        # 媒体评分
 │   │   ├── DailyReport.tsx        # 日报周报月报
 │   │   ├── ScreenCapture.tsx      # 截图录屏
-│   │   ├── AutoClick.tsx          # 自动点击
-│   │   ├── ScheduledTasks.tsx     # 定时任务
-│   │   ├── SvnBatchUpdate.tsx     # SVN 批量更新
-│   │   └── ConfigDoc.tsx          # 配置说明文档页
+│   │   ├── AutoClick.tsx          # 自动点击（含预设方案）
+│   │   ├── ScheduledTasks.tsx     # 定时任务（含 SVN 批量更新）
+│   │   ├── ConfigDoc.tsx          # 配置说明文档页
+│   │   └── Changelog.tsx          # 更新日志页
 │   └── types/
-│       └── global.d.ts            # 全局类型声明
+│       └── index.ts               # 全局类型声明（ElectronAPI 等）
 ├── scripts/
 │   └── build.js                   # 多版本打包脚本
 ├── package.json                    # 项目配置
