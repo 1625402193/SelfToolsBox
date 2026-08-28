@@ -1,6 +1,6 @@
 {
   "name": "file-classifier-tools",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "多功能工具箱 - 文件分类/批量移动/日报周报/截图录屏/自动点击",
   "main": "electron/main.js",
   "scripts": {

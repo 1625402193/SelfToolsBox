@@ -100,9 +100,16 @@ export default function AutoClick() {
   const stopTimeRef = useRef<number>(0)
   const logsEndRef = useRef<HTMLDivElement>(null)
   const runningRef = useRef(false)
+  // 标记正在应用预设：此时不要让「切到时间段模式」的 effect 用当前时间覆盖预设里的时间
+  const applyingPresetRef = useRef(false)
 
-  // 切换到时间段模式时，自动更新为当前时间
+  // 切换到时间段模式时，自动更新为当前时间（仅用户手动切换时生效）
   useEffect(() => {
+    if (applyingPresetRef.current) {
+      // 本次模式变化由应用预设引起，时间已由预设写入，跳过自动填充
+      applyingPresetRef.current = false
+      return
+    }
     if (!isDurationMode) {
       const n = new Date()
       const end = new Date(n.getTime() + 30 * 60 * 1000)
@@ -375,6 +382,11 @@ export default function AutoClick() {
   const applyPreset = (name: string) => {
     const preset = presets.find(p => p.name === name)
     if (!preset) return
+    // 若运行模式发生变化，会触发 isDurationMode 的 effect；
+    // 先置位标记，避免该 effect 用当前时间覆盖预设中保存的起止时间
+    if (preset.isDurationMode !== isDurationMode) {
+      applyingPresetRef.current = true
+    }
     setIsDurationMode(preset.isDurationMode)
     setDurationMinutes(preset.durationMinutes)
     setStartHour(preset.startHour)

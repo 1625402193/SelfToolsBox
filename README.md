@@ -6,13 +6,13 @@
 
 ## 📥 下载
 
-最新版本：**v1.1.0**（Windows x64 便携版，下载后双击即可运行，无需安装）
+最新版本：**v1.1.1**（Windows x64 便携版，下载后双击即可运行，无需安装）
 
 | 版本 | 下载 | 包含功能 |
 |------|------|----------|
-| **全能版** | [ToolBox-Full-1.1.0.exe](https://github.com/1625402193/SelfToolsBox/releases/download/v1.1.0/ToolBox-Full-1.1.0.exe) | 全部功能 |
-| **工作版** | [ToolBox-Work-1.1.0.exe](https://github.com/1625402193/SelfToolsBox/releases/download/v1.1.0/ToolBox-Work-1.1.0.exe) | 日报周报、截图录屏、自动点击、定时任务 |
-| **普通版** | [ToolBox-Normal-1.1.0.exe](https://github.com/1625402193/SelfToolsBox/releases/download/v1.1.0/ToolBox-Normal-1.1.0.exe) | 文件分类、批量移动、媒体评分、截图录屏、自动点击 |
+| **全能版** | [ToolBox-Full-1.1.1.exe](https://github.com/1625402193/SelfToolsBox/releases/download/v1.1.1/ToolBox-Full-1.1.1.exe) | 全部功能 |
+| **工作版** | [ToolBox-Work-1.1.1.exe](https://github.com/1625402193/SelfToolsBox/releases/download/v1.1.1/ToolBox-Work-1.1.1.exe) | 日报周报、截图录屏、自动点击、定时任务 |
+| **普通版** | [ToolBox-Normal-1.1.1.exe](https://github.com/1625402193/SelfToolsBox/releases/download/v1.1.1/ToolBox-Normal-1.1.1.exe) | 文件分类、批量移动、媒体评分、截图录屏、自动点击 |
 
 > 所有版本请见 [Releases 页面](https://github.com/1625402193/SelfToolsBox/releases)
 
