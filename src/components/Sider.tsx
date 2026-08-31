@@ -33,17 +33,37 @@ const menuItems = allMenuItems.filter(item => item.editions.includes(edition))
 export default function AppSider() {
   const location = useLocation()
   const navigate = useNavigate()
-  const [alwaysOnTop, setAlwaysOnTop] = useState(true)
+  // 初始为 null 表示「未知」，等主进程回报真实状态后再确定。
+  // 注：之前默认值设为 true，但主进程启动期间窗口可能短暂失焦触发 blur 让位逻辑，
+  // setAlwaysOnTop(false) 后 alwaysOnTopEnabled 变量并未更新，导致 UI 显示勾选但实际未置顶。
+  const [alwaysOnTop, setAlwaysOnTop] = useState<boolean | null>(null)
 
   // 读取主进程当前置顶状态，并监听菜单栏切换事件保持同步
   useEffect(() => {
+    let cancelled = false
     const api = window.electronAPI
-    if (!api) return
+    if (!api) {
+      setAlwaysOnTop(false)
+      return
+    }
     api.getAlwaysOnTop?.().then(res => {
-      if (res?.success) setAlwaysOnTop(res.enabled)
-    }).catch(() => {})
-    const off = api.onAlwaysOnTopChanged?.(enabled => setAlwaysOnTop(enabled))
-    return () => { off?.() }
+      if (cancelled) return
+      if (res?.success && typeof res.enabled === 'boolean') {
+        setAlwaysOnTop(res.enabled)
+      } else {
+        setAlwaysOnTop(false)
+      }
+    }).catch(() => {
+      if (cancelled) return
+      setAlwaysOnTop(false)
+    })
+    const off = api.onAlwaysOnTopChanged?.(enabled => {
+      if (!cancelled) setAlwaysOnTop(enabled)
+    })
+    return () => {
+      cancelled = true
+      off?.()
+    }
   }, [])
 
   const handleToggle = async (checked: boolean) => {
@@ -78,7 +98,12 @@ export default function AppSider() {
               <PushpinOutlined style={{ marginRight: 6, color: alwaysOnTop ? '#1677ff' : '#bbb' }} />
               窗口置顶
             </span>
-            <Switch size="small" checked={alwaysOnTop} onChange={handleToggle} />
+            <Switch
+              size="small"
+              checked={alwaysOnTop ?? false}
+              loading={alwaysOnTop === null}
+              onChange={handleToggle}
+            />
           </div>
         </Tooltip>
       </div>

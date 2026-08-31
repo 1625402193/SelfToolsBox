@@ -373,8 +373,15 @@ app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) creat
 // ===================== IPC Handlers =====================
 
 // 读取窗口置顶状态
+// 注：必须返回 mainWindow.isAlwaysOnTop() 而非 alwaysOnTopEnabled 变量。
+// 启动后页面加载过程中窗口可能短暂失焦，blur 监听器会主动调用 setAlwaysOnTop(false)
+// 给截图工具让位（不影响配置意图），但此时 alwaysOnTopEnabled 仍是 true。
+// 如果返回变量，会导致渲染端 UI 显示「勾选」而实际窗口未置顶，需要用户取消再勾选才生效。
 ipcMain.handle('window:getAlwaysOnTop', () => {
-  return { success: true, enabled: alwaysOnTopEnabled };
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return { success: true, enabled: false };
+  }
+  return { success: true, enabled: mainWindow.isAlwaysOnTop() };
 });
 
 // 设置窗口置顶状态（并持久化）

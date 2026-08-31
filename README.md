@@ -6,13 +6,13 @@
 
 ## 📥 下载
 
-最新版本：**v1.1.1**（Windows x64 便携版，下载后双击即可运行，无需安装）
+最新版本：**v1.1.2**（Windows x64 便携版，下载后双击即可运行，无需安装）
 
 | 版本 | 下载 | 包含功能 |
 |------|------|----------|
-| **全能版** | [ToolBox-Full-1.1.1.exe](https://github.com/1625402193/SelfToolsBox/releases/download/v1.1.1/ToolBox-Full-1.1.1.exe) | 全部功能 |
-| **工作版** | [ToolBox-Work-1.1.1.exe](https://github.com/1625402193/SelfToolsBox/releases/download/v1.1.1/ToolBox-Work-1.1.1.exe) | 日报周报、截图录屏、自动点击、定时任务 |
-| **普通版** | [ToolBox-Normal-1.1.1.exe](https://github.com/1625402193/SelfToolsBox/releases/download/v1.1.1/ToolBox-Normal-1.1.1.exe) | 文件分类、批量移动、媒体评分、截图录屏、自动点击 |
+| **全能版** | [ToolBox-Full-1.1.2.exe](https://github.com/1625402193/SelfToolsBox/releases/download/v1.1.2/ToolBox-Full-1.1.2.exe) | 全部功能 |
+| **工作版** | [ToolBox-Work-1.1.2.exe](https://github.com/1625402193/SelfToolsBox/releases/download/v1.1.2/ToolBox-Work-1.1.2.exe) | 日报周报、截图录屏、自动点击、定时任务 |
+| **普通版** | [ToolBox-Normal-1.1.2.exe](https://github.com/1625402193/SelfToolsBox/releases/download/v1.1.2/ToolBox-Normal-1.1.2.exe) | 文件分类、批量移动、媒体评分、截图录屏、自动点击 |
 
 > 所有版本请见 [Releases 页面](https://github.com/1625402193/SelfToolsBox/releases)
 
@@ -288,7 +288,7 @@
 ## ❓ 常见问题
 
 **Q: 程序窗口总是在最前面怎么办？**
-A: 这是默认设计，方便随时使用。暂不支持取消置顶。
+A: 这是默认设计，方便随时使用。可在左侧栏底部或菜单栏「窗口 → 窗口置顶」关闭；关闭后窗口不再置顶。
 
 **Q: 录屏保存的文件用什么播放器打开？**
 A: WebM 格式可以用浏览器（Chrome/Edge）或 VLC 播放器打开。
