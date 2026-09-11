@@ -1746,3 +1746,909 @@ ipcMain.handle('media:deleteFile', async (_event, filePath, toTrash) => {
   }
 });
 
+// ===================== 批量复制图片 IPC Handlers =====================
+
+const IMAGE_COPY_EXTS = new Set([
+  '.png', '.jpg', '.jpeg', '.bmp', '.gif', '.webp', '.tga', '.tif', '.tiff', '.psd',
+]);
+
+// 通用前缀段：这些段在所有资源名中都相同（如 Icon_ / UI_），不具备区分度，
+// 提取分类键时跳过它们，改用后面的业务段（Icon_ShareTalk_xxx → 业务段 ShareTalk）
+const DEFAULT_GENERIC_PREFIXES = ['icon', 'img', 'image', 'ui', 'tex', 'texture', 'pic', 'sprite', 'spr', 'bg'];
+
+// 索引 / 日志文件均存放在 userData（软件本地目录），不随项目上传。
+// 每个目标路径拥有独立的索引文件（以路径 hash 命名），互不干扰：
+// 多个目标路径是彼此独立的处理单元，检索、匹配、复制都各做各的，不做合并。
+function getImageCopyIndexDir() {
+  return path.join(app.getPath('userData'), 'image-copy-index');
+}
+function getImageCopyIndexFile(root) {
+  const hash = crypto.createHash('md5').update(path.resolve(root).toLowerCase()).digest('hex');
+  return path.join(getImageCopyIndexDir(), `${hash}.json`);
+}
+function getImageCopyLogPath() {
+  return path.join(app.getPath('userData'), 'image-copy-log.jsonl');
+}
+
+// 主进程侧缓存：索引与扫描结果数据量较大，避免在 IPC 中反复往返传输
+// index 形如 { roots: [{ root, updatedAt, stats, entries }] }
+let imageCopyState = { index: null, scan: null, plan: null };
+
+/**
+ * 从文件头解析图片尺寸（不引入第三方依赖）。
+ * 支持 PNG / GIF / BMP / WEBP / JPEG，解析失败返回 null 由调用方降级处理。
+ */
+function parseImageSizeFromBuffer(buf) {
+  if (!buf || buf.length < 16) return null;
+
+  // PNG：IHDR 固定为首个 chunk
+  if (buf.length >= 24 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) {
+    if (buf.toString('ascii', 12, 16) === 'IHDR') {
+      return { width: buf.readUInt32BE(16), height: buf.readUInt32BE(20) };
+    }
+  }
+
+  // GIF
+  if (buf.length >= 10 && buf.toString('ascii', 0, 3) === 'GIF') {
+    return { width: buf.readUInt16LE(6), height: buf.readUInt16LE(8) };
+  }
+
+  // BMP（高度可能为负，表示自上而下存储）
+  if (buf.length >= 26 && buf[0] === 0x42 && buf[1] === 0x4d) {
+    return { width: Math.abs(buf.readInt32LE(18)), height: Math.abs(buf.readInt32LE(22)) };
+  }
+
+  // WEBP
+  if (buf.length >= 30 && buf.toString('ascii', 0, 4) === 'RIFF' && buf.toString('ascii', 8, 12) === 'WEBP') {
+    const fourCC = buf.toString('ascii', 12, 16);
+    if (fourCC === 'VP8 ') {
+      return { width: buf.readUInt16LE(26) & 0x3fff, height: buf.readUInt16LE(28) & 0x3fff };
+    }
+    if (fourCC === 'VP8L') {
+      const bits = buf.readUInt32LE(21);
+      return { width: (bits & 0x3fff) + 1, height: ((bits >> 14) & 0x3fff) + 1 };
+    }
+    if (fourCC === 'VP8X') {
+      return { width: buf.readUIntLE(24, 3) + 1, height: buf.readUIntLE(27, 3) + 1 };
+    }
+  }
+
+  // JPEG：遍历 segment 找 SOFn
+  if (buf[0] === 0xff && buf[1] === 0xd8) {
+    let offset = 2;
+    while (offset + 9 < buf.length) {
+      if (buf[offset] !== 0xff) { offset++; continue; }
+      const marker = buf[offset + 1];
+      // 填充字节 / SOI / RSTn：无长度字段
+      if (marker === 0xff || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd8)) { offset += 2; continue; }
+      // EOI / SOS：之后是熵编码数据，不再有尺寸信息
+      if (marker === 0xd9 || marker === 0xda) break;
+      const segLen = buf.readUInt16BE(offset + 2);
+      if (segLen < 2) break;
+      // SOF0~SOF15，排除 DHT(C4) / JPG(C8) / DAC(CC)
+      const isSOF = marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc;
+      if (isSOF && offset + 9 < buf.length) {
+        return { height: buf.readUInt16BE(offset + 5), width: buf.readUInt16BE(offset + 7) };
+      }
+      offset += 2 + segLen;
+    }
+  }
+
+  // PSD
+  if (buf.length >= 26 && buf.toString('ascii', 0, 4) === '8BPS') {
+    return { width: buf.readUInt32BE(18), height: buf.readUInt32BE(14) };
+  }
+
+  return null;
+}
+
+// 读取图片尺寸：优先文件头解析，失败时降级到 nativeImage（覆盖 tiff 等格式）
+function readImageSize(filePath) {
+  const ext = path.extname(filePath).toLowerCase();
+  let fd = null;
+  try {
+    fd = fs.openSync(filePath, 'r');
+    const stat = fs.fstatSync(fd);
+    // JPEG 的 SOF 段可能不在最前面，读取 256KB 足以覆盖绝大多数情况
+    const len = Math.min(stat.size, 256 * 1024);
+    const buf = Buffer.alloc(len);
+    fs.readSync(fd, buf, 0, len, 0);
+    fs.closeSync(fd);
+    fd = null;
+
+    // TGA 无 magic number，只能按扩展名解析固定头
+    if (ext === '.tga' && buf.length >= 18) {
+      const w = buf.readUInt16LE(12);
+      const h = buf.readUInt16LE(14);
+      if (w > 0 && h > 0) return { width: w, height: h };
+    }
+    const size = parseImageSizeFromBuffer(buf);
+    if (size && size.width > 0 && size.height > 0) return size;
+  } catch (e) {
+    // 忽略，走降级分支
+  } finally {
+    if (fd !== null) { try { fs.closeSync(fd); } catch (e) {} }
+  }
+
+  try {
+    const { nativeImage } = require('electron');
+    const img = nativeImage.createFromPath(filePath);
+    if (!img.isEmpty()) {
+      const s = img.getSize();
+      if (s.width > 0 && s.height > 0) return s;
+    }
+  } catch (e) {}
+  return null;
+}
+
+// 按 _ - 空格 . 拆分文件名为语义段
+function splitNameSegments(baseName) {
+  return String(baseName).split(/[_\-\s.]+/).filter(Boolean);
+}
+
+/**
+ * 提取分类键。
+ * 规则：跳过开头的通用前缀段（Icon_ 等），取其后 keySegments 个业务段作为唯一键。
+ * 例：keySegments=1 时
+ *   Icon_ShareTalk_ChangE_RiYue_Btn.png → key=sharetalk, display=Icon_ShareTalk_
+ *   Icon_ShareTalk_01.png               → key=sharetalk, display=Icon_ShareTalk_
+ *   Icon_ShareTalk_hero_02.png          → key=sharetalk, display=Icon_ShareTalk_
+ * 这样同一业务模块的图片会归入同一分类，即需求中要求的"模糊性"。
+ */
+function extractGroupKey(fileName, options) {
+  const opts = options || {};
+  const keySegments = Math.max(1, Number(opts.keySegments) || 1);
+  const prefixList = Array.isArray(opts.genericPrefixes) && opts.genericPrefixes.length
+    ? opts.genericPrefixes
+    : DEFAULT_GENERIC_PREFIXES;
+  const generic = new Set(prefixList.map(s => String(s).toLowerCase()));
+
+  const base = path.basename(fileName, path.extname(fileName));
+  const segs = splitNameSegments(base);
+  if (segs.length === 0) {
+    return { key: base.toLowerCase(), display: base };
+  }
+
+  // 跳过开头的通用前缀段，但至少保留最后一段，避免整名被吃空
+  const leading = [];
+  let i = 0;
+  while (i < segs.length - 1 && generic.has(segs[i].toLowerCase())) {
+    leading.push(segs[i]);
+    i++;
+  }
+
+  const picked = segs.slice(i, i + keySegments);
+  if (picked.length === 0) {
+    return { key: base.toLowerCase(), display: base };
+  }
+
+  return {
+    key: picked.join('_').toLowerCase(),
+    // 展示名带尾部下划线，与需求中的 Icon_ShareTalk_ 写法保持一致
+    display: [...leading, ...picked].join('_') + '_',
+  };
+}
+
+// 遍历目录下的图片文件，skipDirs 用于跳过工具自己创建的输出文件夹
+function walkImageFiles(root, recursive, skipDirs, onFile) {
+  const skip = new Set((skipDirs || []).filter(Boolean).map(s => String(s).toLowerCase()));
+  function walk(dir, depth) {
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch (e) {
+      return;
+    }
+    for (const entry of entries) {
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (!recursive || depth >= 12) continue;
+        if (skip.has(entry.name.toLowerCase())) continue;
+        walk(fullPath, depth + 1);
+      } else if (entry.isFile()) {
+        const ext = path.extname(entry.name).toLowerCase();
+        if (!IMAGE_COPY_EXTS.has(ext)) continue;
+        try {
+          onFile(fullPath, fs.statSync(fullPath));
+        } catch (e) {}
+      }
+    }
+  }
+  walk(root, 0);
+}
+
+// 追加操作日志到本地文件（jsonl，逐行追加避免读写整个文件）
+function appendImageCopyLog(entries) {
+  const list = Array.isArray(entries) ? entries : [entries];
+  if (list.length === 0) return;
+  try {
+    const lines = list.map(e => JSON.stringify({ time: new Date().toISOString(), ...e })).join('\n') + '\n';
+    fs.appendFileSync(getImageCopyLogPath(), lines, 'utf-8');
+  } catch (e) {}
+}
+
+// ---------- 目标索引 ----------
+
+// 把单个目标路径下的图片聚合成「键 → 目录列表」
+function buildRootIndex(root, recursive, skipDirs, opts) {
+  const entries = {};
+  let imageCount = 0;
+  walkImageFiles(root, recursive, skipDirs, (filePath, stat) => {
+    imageCount++;
+    const name = path.basename(filePath);
+    const { key, display } = extractGroupKey(name, opts);
+    const dir = path.dirname(filePath);
+    if (!entries[key]) entries[key] = { key, display, dirs: [] };
+    let bucket = entries[key].dirs.find(d => d.dir === dir);
+    if (!bucket) {
+      bucket = { dir, files: [] };
+      entries[key].dirs.push(bucket);
+    }
+    bucket.files.push({ name, path: filePath, size: stat.size, modifyTime: stat.mtime.toISOString() });
+  });
+
+  const keyList = Object.keys(entries);
+  return {
+    root,
+    version: 2,
+    updatedAt: new Date().toISOString(),
+    options: { keySegments: opts.keySegments || 1, recursive },
+    stats: {
+      keyCount: keyList.length,
+      dirCount: keyList.reduce((sum, k) => sum + entries[k].dirs.length, 0),
+      imageCount,
+      // 同一目标路径内部，一个键落在多个子目录时仍需用户选择
+      multiDirKeyCount: keyList.filter(k => entries[k].dirs.length > 1).length,
+    },
+    entries,
+  };
+}
+
+// 索引明细体积较大，只回传摘要给渲染进程
+function summarizeRootIndex(rootIndex) {
+  const entries = rootIndex.entries || {};
+  return {
+    root: rootIndex.root,
+    updatedAt: rootIndex.updatedAt,
+    indexFile: getImageCopyIndexFile(rootIndex.root),
+    stats: rootIndex.stats || {},
+    entries: Object.keys(entries)
+      .map(k => ({
+        key: k,
+        display: entries[k].display,
+        dirCount: (entries[k].dirs || []).length,
+        fileCount: (entries[k].dirs || []).reduce((s, d) => s + (d.files || []).length, 0),
+        dirs: (entries[k].dirs || []).map(d => d.dir),
+      }))
+      .sort((a, b) => a.display.localeCompare(b.display, 'zh-CN', { numeric: true })),
+  };
+}
+
+/**
+ * 为每个目标路径分别建立索引。
+ * 多个目标路径彼此独立：各自检索、各自落盘（一个路径一个索引文件），不做任何跨路径合并。
+ */
+ipcMain.handle('imageCopy:buildIndex', async (_event, targetPaths, options) => {
+  const opts = options || {};
+  const recursive = opts.recursive !== false;
+  const skipDirs = [opts.oddSizeFolderName, opts.unmatchedFolderName];
+
+  try {
+    const valid = [];
+    const missing = [];
+    for (const p of targetPaths || []) {
+      if (!p) continue;
+      if (fs.existsSync(p)) valid.push(p);
+      else missing.push(p);
+    }
+    if (valid.length === 0) {
+      return { success: false, error: '没有有效的目标路径' };
+    }
+
+    fs.mkdirSync(getImageCopyIndexDir(), { recursive: true });
+
+    const roots = [];
+    const logs = [];
+    for (const root of valid) {
+      const rootIndex = buildRootIndex(root, recursive, skipDirs, opts);
+      fs.writeFileSync(getImageCopyIndexFile(root), JSON.stringify(rootIndex, null, 2), 'utf-8');
+      roots.push(rootIndex);
+      const s = rootIndex.stats;
+      logs.push({
+        action: 'buildIndex',
+        level: 'success',
+        message: `目标路径索引完成：${root} → ${s.imageCount} 张图 / ${s.keyCount} 个键（${s.multiDirKeyCount} 个键在该路径内分布于多个目录）`,
+        detail: { root, indexFile: getImageCopyIndexFile(root) },
+      });
+    }
+    if (missing.length) {
+      logs.push({ action: 'buildIndex', level: 'warn', message: `以下目标路径不存在，已跳过：${missing.join('、')}` });
+    }
+    appendImageCopyLog(logs);
+
+    imageCopyState.index = { roots };
+    imageCopyState.plan = null;
+
+    return {
+      success: true,
+      data: {
+        exists: true,
+        indexDir: getImageCopyIndexDir(),
+        missing,
+        roots: roots.map(summarizeRootIndex),
+      },
+    };
+  } catch (err) {
+    appendImageCopyLog({ action: 'buildIndex', level: 'error', message: `重建索引失败：${err.message}` });
+    return { success: false, error: err.message };
+  }
+});
+
+/**
+ * 读取已落盘的索引。
+ * 传入 targetPaths 时只加载这些路径对应的索引文件（各自独立），
+ * 未传时加载索引目录下的全部索引。
+ */
+ipcMain.handle('imageCopy:loadIndex', async (_event, targetPaths) => {
+  try {
+    const dir = getImageCopyIndexDir();
+    if (!fs.existsSync(dir)) {
+      return { success: true, data: { exists: false, indexDir: dir, roots: [] } };
+    }
+
+    const roots = [];
+    const wanted = (targetPaths || []).map(p => String(p || '').trim()).filter(Boolean);
+
+    const readIndexFile = file => {
+      try {
+        const data = JSON.parse(fs.readFileSync(file, 'utf-8'));
+        return data && data.root ? data : null;
+      } catch (e) {
+        return null;
+      }
+    };
+
+    if (wanted.length > 0) {
+      for (const root of wanted) {
+        const file = getImageCopyIndexFile(root);
+        if (!fs.existsSync(file)) continue;
+        const data = readIndexFile(file);
+        if (data) roots.push(data);
+      }
+    } else {
+      for (const name of fs.readdirSync(dir)) {
+        if (!name.endsWith('.json')) continue;
+        const data = readIndexFile(path.join(dir, name));
+        if (data) roots.push(data);
+      }
+    }
+
+    imageCopyState.index = roots.length > 0 ? { roots } : null;
+    return {
+      success: true,
+      data: {
+        exists: roots.length > 0,
+        indexDir: dir,
+        roots: roots.map(summarizeRootIndex),
+      },
+    };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+// ---------- 源路径扫描 ----------
+
+/**
+ * 检索源路径下的图片，完成三件事：
+ * 1. 分类：按与索引一致的规则提取分类键
+ * 2. 合并：跨源路径同名文件只保留创建/修改时间最新的一张
+ * 3. 尺寸校验：宽高必须均为 2 的倍数，不合格的不参与后续复制，
+ *    并复制到「首个源路径 / 尺寸文件夹」中（仅在确实存在不合格图片时才创建该文件夹）
+ */
+ipcMain.handle('imageCopy:scanSources', async (_event, sourcePaths, options) => {
+  const opts = options || {};
+  const recursive = opts.recursive !== false;
+  const oddSizeFolderName = opts.oddSizeFolderName || '尺寸异常';
+  const skipDirs = [oddSizeFolderName, opts.unmatchedFolderName];
+
+  try {
+    const valid = [];
+    const missing = [];
+    for (const p of sourcePaths || []) {
+      if (!p) continue;
+      if (fs.existsSync(p)) valid.push(p);
+      else missing.push(p);
+    }
+    if (valid.length === 0) {
+      return { success: false, error: '没有有效的源路径' };
+    }
+
+    // 收集所有图片
+    const collected = [];
+    for (const root of valid) {
+      walkImageFiles(root, recursive, skipDirs, (filePath, stat) => {
+        collected.push({
+          name: path.basename(filePath),
+          path: filePath,
+          root,
+          size: stat.size,
+          // 创建时间与修改时间取较新者，作为「最新」的判定依据
+          latestTime: Math.max(stat.mtimeMs || 0, stat.birthtimeMs || 0),
+          modifyTime: stat.mtime.toISOString(),
+        });
+      });
+    }
+
+    // 合并同名文件：只保留最新的一张
+    const byName = new Map();
+    const duplicates = [];
+    for (const item of collected) {
+      const nameKey = item.name.toLowerCase();
+      const exist = byName.get(nameKey);
+      if (!exist) {
+        byName.set(nameKey, item);
+        continue;
+      }
+      const [keep, drop] = item.latestTime > exist.latestTime ? [item, exist] : [exist, item];
+      byName.set(nameKey, keep);
+      duplicates.push({ name: drop.name, dropped: drop.path, kept: keep.path });
+    }
+
+    // 尺寸校验 + 分类
+    const files = [];
+    const oddSized = [];
+    const unknownSize = [];
+    for (const item of byName.values()) {
+      const { key, display } = extractGroupKey(item.name, opts);
+      const size = readImageSize(item.path);
+      const record = {
+        ...item,
+        key,
+        display,
+        width: size ? size.width : null,
+        height: size ? size.height : null,
+      };
+      if (!size) {
+        // 尺寸读不出来时不阻断流程，仅记录警告，仍参与复制
+        record.sizeUnknown = true;
+        unknownSize.push(record);
+        files.push(record);
+      } else if (size.width % 2 !== 0 || size.height % 2 !== 0) {
+        record.oddSized = true;
+        oddSized.push(record);
+      } else {
+        files.push(record);
+      }
+    }
+
+    // 存在尺寸异常图片时，复制到首个源路径下的尺寸文件夹
+    let oddSizeFolder = null;
+    const logs = [];
+    if (oddSized.length > 0) {
+      oddSizeFolder = path.join(valid[0], oddSizeFolderName);
+      try {
+        fs.mkdirSync(oddSizeFolder, { recursive: true });
+        logs.push({ action: 'mkdir', level: 'warn', message: `创建尺寸异常文件夹：${oddSizeFolder}` });
+        for (const item of oddSized) {
+          try {
+            fs.copyFileSync(item.path, path.join(oddSizeFolder, item.name));
+            logs.push({
+              action: 'oddSize',
+              level: 'warn',
+              message: `尺寸非 2 的倍数（${item.width}×${item.height}），已复制到尺寸异常文件夹：${item.name}`,
+              detail: { from: item.path },
+            });
+          } catch (e) {
+            logs.push({ action: 'oddSize', level: 'error', message: `复制到尺寸异常文件夹失败：${item.name} - ${e.message}` });
+          }
+        }
+      } catch (e) {
+        oddSizeFolder = null;
+        logs.push({ action: 'mkdir', level: 'error', message: `创建尺寸异常文件夹失败：${e.message}` });
+      }
+    }
+
+    // 按分类键聚合
+    const groupMap = new Map();
+    for (const f of files) {
+      if (!groupMap.has(f.key)) groupMap.set(f.key, { key: f.key, display: f.display, files: [] });
+      groupMap.get(f.key).files.push(f);
+    }
+    const groups = [...groupMap.values()].sort((a, b) =>
+      a.display.localeCompare(b.display, 'zh-CN', { numeric: true }));
+
+    const scan = {
+      sourcePaths: valid,
+      scannedAt: new Date().toISOString(),
+      groups,
+      files,
+      oddSized,
+      unknownSize,
+      duplicates,
+      oddSizeFolder,
+    };
+    imageCopyState.scan = scan;
+    imageCopyState.plan = null;
+
+    logs.unshift({
+      action: 'scanSources',
+      level: 'success',
+      message: `扫描源路径完成：共 ${collected.length} 张图，合并重名 ${duplicates.length} 张，尺寸异常 ${oddSized.length} 张，待处理 ${files.length} 张，归为 ${groups.length} 个分类`,
+      detail: { sourcePaths: valid, missing },
+    });
+    appendImageCopyLog(logs);
+
+    return {
+      success: true,
+      data: {
+        scannedAt: scan.scannedAt,
+        missing,
+        total: collected.length,
+        pending: files.length,
+        oddSizeFolder,
+        groups: groups.map(g => ({
+          key: g.key,
+          display: g.display,
+          fileCount: g.files.length,
+          files: g.files.map(f => ({
+            name: f.name, path: f.path, width: f.width, height: f.height, sizeUnknown: !!f.sizeUnknown,
+          })),
+        })),
+        oddSized: oddSized.map(f => ({ name: f.name, path: f.path, width: f.width, height: f.height })),
+        unknownSize: unknownSize.map(f => ({ name: f.name, path: f.path })),
+        duplicates,
+        logs,
+      },
+    };
+  } catch (err) {
+    appendImageCopyLog({ action: 'scanSources', level: 'error', message: `扫描源路径失败：${err.message}` });
+    return { success: false, error: err.message };
+  }
+});
+
+// ---------- 匹配与复制 ----------
+
+/**
+ * 为每个目标路径生成短标签，用于「未匹配」文件夹下按目标路径分子目录。
+ * 以目录名为主，重名时追加序号保证唯一。
+ */
+function makeRootLabels(roots) {
+  const labels = {};
+  const used = new Set();
+  for (const root of roots) {
+    let base = path.basename(root) || root.replace(/[\\/:]/g, '_');
+    let label = base;
+    let i = 2;
+    while (used.has(label.toLowerCase())) {
+      label = `${base}_${i}`;
+      i++;
+    }
+    used.add(label.toLowerCase());
+    labels[root] = label;
+  }
+  return labels;
+}
+
+// 多目录选择的复合键：目标路径与分类键共同决定一次选择，避免不同目标路径互相串味
+function choiceKey(root, key) {
+  return `${root}||${key}`;
+}
+
+/**
+ * 将扫描结果分别与每个目标路径的索引匹配，为每个目标路径生成一份独立的复制计划。
+ * 每个目标路径内部：
+ * - direct：键在该路径内唯一命中一个目录，可直接复制
+ * - ambiguous：键在该路径内命中多个目录，需要用户选择
+ * - unmatched：该路径的索引中没有这个键
+ * 同一张图会分别复制到每个目标路径下各自对应的目录，互不影响。
+ */
+ipcMain.handle('imageCopy:makePlan', async () => {
+  try {
+    const { index, scan } = imageCopyState;
+    if (!index || !index.roots || index.roots.length === 0) {
+      return { success: false, error: '尚未建立目标索引，请先执行「重建目标索引」' };
+    }
+    if (!scan) return { success: false, error: '尚未扫描源路径，请先执行「扫描源路径」' };
+
+    const rootPlans = [];
+    const logs = [];
+
+    for (const rootIndex of index.roots) {
+      const entries = rootIndex.entries || {};
+      const direct = [];
+      const ambiguous = [];
+      const unmatched = [];
+
+      for (const group of scan.groups) {
+        const entry = entries[group.key];
+        const dirs = entry ? (entry.dirs || []) : [];
+        if (dirs.length === 1) {
+          direct.push({ key: group.key, display: group.display, targetDir: dirs[0].dir, files: group.files });
+        } else if (dirs.length > 1) {
+          ambiguous.push({
+            key: group.key,
+            display: group.display,
+            candidates: dirs.map(d => ({ dir: d.dir, sampleCount: (d.files || []).length })),
+            files: group.files,
+          });
+        } else {
+          unmatched.push({ key: group.key, display: group.display, files: group.files });
+        }
+      }
+
+      rootPlans.push({ root: rootIndex.root, direct, ambiguous, unmatched });
+      logs.push({
+        action: 'makePlan',
+        level: 'info',
+        message: `目标路径匹配结果：${rootIndex.root} → 直接命中 ${direct.length} 个分类，需人工选择 ${ambiguous.length} 个，未命中 ${unmatched.length} 个`,
+        detail: { root: rootIndex.root },
+      });
+    }
+
+    const plan = { roots: rootPlans, createdAt: new Date().toISOString() };
+    imageCopyState.plan = plan;
+    appendImageCopyLog(logs);
+
+    const brief = g => ({
+      key: g.key,
+      display: g.display,
+      fileCount: g.files.length,
+      fileNames: g.files.map(f => f.name),
+    });
+
+    return {
+      success: true,
+      data: {
+        roots: rootPlans.map(rp => ({
+          root: rp.root,
+          direct: rp.direct.map(g => ({ ...brief(g), targetDir: g.targetDir })),
+          ambiguous: rp.ambiguous.map(g => ({ ...brief(g), candidates: g.candidates })),
+          unmatched: rp.unmatched.map(brief),
+        })),
+      },
+    };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+/**
+ * 展开成最终的文件级复制任务。
+ * 每个目标路径各自展开一遍，因此同一张源图会为每个目标路径生成一个独立任务。
+ * unmatchedDirs: { root: dir }，为空表示该目标路径不需要未匹配文件夹。
+ */
+function buildCopyTasks(plan, choices, unmatchedDirs) {
+  const tasks = [];
+  for (const rp of plan.roots) {
+    for (const group of rp.direct) {
+      for (const f of group.files) {
+        tasks.push({
+          root: rp.root, key: group.key, display: group.display,
+          name: f.name, src: f.path, destDir: group.targetDir, kind: 'matched',
+        });
+      }
+    }
+    for (const group of rp.ambiguous) {
+      const chosen = choices && choices[choiceKey(rp.root, group.key)];
+      if (!chosen) continue; // 用户未对该目标路径下的这个分类做选择，本轮跳过
+      for (const f of group.files) {
+        tasks.push({
+          root: rp.root, key: group.key, display: group.display,
+          name: f.name, src: f.path, destDir: chosen, kind: 'matched',
+        });
+      }
+    }
+    const unmatchedDir = unmatchedDirs && unmatchedDirs[rp.root];
+    if (unmatchedDir) {
+      for (const group of rp.unmatched) {
+        for (const f of group.files) {
+          tasks.push({
+            root: rp.root, key: group.key, display: group.display,
+            name: f.name, src: f.path, destDir: unmatchedDir, kind: 'unmatched',
+          });
+        }
+      }
+    }
+  }
+  return tasks;
+}
+
+/**
+ * 计算每个目标路径对应的「未匹配」文件夹。
+ * 文件夹统一建在首个源路径下；存在多个目标路径时再按目标路径分子目录，
+ * 这样各目标路径的未匹配结果同样是分离的。
+ */
+function resolveUnmatchedDirs(plan, scan, folderName) {
+  const result = {};
+  if (!scan || !scan.sourcePaths || scan.sourcePaths.length === 0) return result;
+  const base = path.join(scan.sourcePaths[0], folderName || '未匹配');
+  const multiRoot = plan.roots.length > 1;
+  const labels = multiRoot ? makeRootLabels(plan.roots.map(rp => rp.root)) : null;
+  for (const rp of plan.roots) {
+    if (rp.unmatched.length === 0) continue;
+    result[rp.root] = multiRoot ? path.join(base, labels[rp.root]) : base;
+  }
+  return result;
+}
+
+// 预检冲突：返回目标目录下已存在的同名文件，供界面询问是否覆盖
+ipcMain.handle('imageCopy:checkConflicts', async (_event, options) => {
+  const opts = options || {};
+  try {
+    const { plan, scan } = imageCopyState;
+    if (!plan) return { success: false, error: '尚未生成复制计划' };
+
+    const unmatchedDirs = resolveUnmatchedDirs(plan, scan, opts.unmatchedFolderName);
+    const tasks = buildCopyTasks(plan, opts.choices, unmatchedDirs);
+    const conflicts = [];
+    for (const t of tasks) {
+      const destPath = path.join(t.destDir, t.name);
+      if (t.kind === 'matched' && fs.existsSync(destPath)) {
+        let existSize = 0;
+        let existTime = '';
+        try {
+          const st = fs.statSync(destPath);
+          existSize = st.size;
+          existTime = st.mtime.toISOString();
+        } catch (e) {}
+        conflicts.push({
+          root: t.root, key: t.key, display: t.display, name: t.name,
+          src: t.src, destPath, existSize, existTime,
+        });
+      }
+    }
+    return { success: true, data: { total: tasks.length, conflicts, unmatchedDirs } };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+/**
+ * 执行复制。每个目标路径独立处理，同一张源图会分别复制到各目标路径下对应的目录。
+ * options:
+ *   choices          多目录键的用户选择 { "目标路径||分类键": 目录 }
+ *   overwriteMode    'overwrite' 全部覆盖 | 'skip' 全部跳过 | 'decide' 按 decisions 逐项决定
+ *   decisions        { destPath: true(覆盖) | false(跳过) }
+ *   unmatchedFolderName 未匹配图片的落地文件夹名
+ */
+ipcMain.handle('imageCopy:execute', async (_event, options) => {
+  const opts = options || {};
+  const overwriteMode = opts.overwriteMode || 'decide';
+  const decisions = opts.decisions || {};
+
+  try {
+    const { plan, scan } = imageCopyState;
+    if (!plan) return { success: false, error: '尚未生成复制计划' };
+
+    const logs = [];
+    // 仅为确实存在未匹配图片的目标路径创建文件夹
+    const planned = resolveUnmatchedDirs(plan, scan, opts.unmatchedFolderName);
+    const unmatchedDirs = {};
+    for (const [root, dir] of Object.entries(planned)) {
+      try {
+        fs.mkdirSync(dir, { recursive: true });
+        unmatchedDirs[root] = dir;
+        logs.push({ action: 'mkdir', level: 'warn', message: `创建未匹配文件夹（对应目标路径 ${root}）：${dir}` });
+      } catch (e) {
+        logs.push({ action: 'mkdir', level: 'error', message: `创建未匹配文件夹失败：${dir} - ${e.message}` });
+      }
+    }
+
+    const tasks = buildCopyTasks(plan, opts.choices, unmatchedDirs);
+    let copied = 0;
+    let overwritten = 0;
+    let skipped = 0;
+    let failed = 0;
+    // 按目标路径分别统计，便于界面区分每个目标路径各自的结果
+    const perRoot = {};
+    const bump = (root, field) => {
+      if (!perRoot[root]) perRoot[root] = { root, copied: 0, overwritten: 0, skipped: 0, failed: 0 };
+      perRoot[root][field]++;
+    };
+
+    for (const t of tasks) {
+      const destPath = path.join(t.destDir, t.name);
+      try {
+        const exists = fs.existsSync(destPath);
+        if (exists) {
+          let allow;
+          if (overwriteMode === 'overwrite') allow = true;
+          else if (overwriteMode === 'skip') allow = false;
+          else allow = decisions[destPath] === true;
+
+          if (!allow) {
+            skipped++;
+            bump(t.root, 'skipped');
+            logs.push({ action: 'skip', level: 'info', message: `跳过已存在文件：${t.name} → ${t.destDir}`, detail: { root: t.root, src: t.src, destPath } });
+            continue;
+          }
+        }
+        fs.mkdirSync(t.destDir, { recursive: true });
+        fs.copyFileSync(t.src, destPath);
+        if (exists) {
+          overwritten++;
+          bump(t.root, 'overwritten');
+          logs.push({ action: 'overwrite', level: 'warn', message: `覆盖同名文件：${t.name} → ${t.destDir}`, detail: { root: t.root, src: t.src, destPath, key: t.display } });
+        } else {
+          copied++;
+          bump(t.root, 'copied');
+          logs.push({
+            action: t.kind === 'unmatched' ? 'copyUnmatched' : 'copy',
+            level: 'success',
+            message: t.kind === 'unmatched'
+              ? `未命中任何键（目标路径 ${t.root}），复制到未匹配文件夹：${t.name}`
+              : `复制成功：${t.name} → ${t.destDir}（分类 ${t.display}）`,
+            detail: { root: t.root, src: t.src, destPath, key: t.display },
+          });
+        }
+      } catch (e) {
+        failed++;
+        bump(t.root, 'failed');
+        logs.push({ action: 'copy', level: 'error', message: `复制失败：${t.name} - ${e.message}`, detail: { root: t.root, src: t.src, destPath } });
+      }
+    }
+
+    for (const r of Object.values(perRoot)) {
+      logs.push({
+        action: 'execute',
+        level: r.failed > 0 ? 'warn' : 'success',
+        message: `目标路径完成：${r.root} → 新增 ${r.copied}，覆盖 ${r.overwritten}，跳过 ${r.skipped}，失败 ${r.failed}`,
+        detail: { root: r.root },
+      });
+    }
+    logs.push({
+      action: 'execute',
+      level: failed > 0 ? 'warn' : 'success',
+      message: `全部完成（${plan.roots.length} 个目标路径）：新增 ${copied}，覆盖 ${overwritten}，跳过 ${skipped}，失败 ${failed}`,
+    });
+    appendImageCopyLog(logs);
+
+    return {
+      success: true,
+      data: {
+        total: tasks.length, copied, overwritten, skipped, failed,
+        unmatchedDirs, perRoot: Object.values(perRoot), logs,
+      },
+    };
+  } catch (err) {
+    appendImageCopyLog({ action: 'execute', level: 'error', message: `执行复制失败：${err.message}` });
+    return { success: false, error: err.message };
+  }
+});
+
+// ---------- 操作日志 ----------
+
+// 读取历史操作日志（倒序返回最近 limit 条）
+ipcMain.handle('imageCopy:readLog', async (_event, limit) => {
+  try {
+    const logPath = getImageCopyLogPath();
+    if (!fs.existsSync(logPath)) return { success: true, data: { logPath, entries: [] } };
+    const lines = fs.readFileSync(logPath, 'utf-8').split('\n').filter(Boolean);
+    const max = Number(limit) > 0 ? Number(limit) : 500;
+    const entries = lines.slice(-max).map(line => {
+      try { return JSON.parse(line); } catch (e) { return null; }
+    }).filter(Boolean).reverse();
+    return { success: true, data: { logPath, entries, total: lines.length } };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+// 由渲染进程写入日志（界面上的操作同样需要留痕）
+ipcMain.handle('imageCopy:appendLog', async (_event, entry) => {
+  appendImageCopyLog(entry);
+  return { success: true };
+});
+
+// 清空操作日志
+ipcMain.handle('imageCopy:clearLog', async () => {
+  try {
+    const logPath = getImageCopyLogPath();
+    if (fs.existsSync(logPath)) fs.unlinkSync(logPath);
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+

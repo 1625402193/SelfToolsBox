@@ -10,6 +10,7 @@ import AutoClick from './pages/AutoClick'
 import ScheduledTasks from './pages/ScheduledTasks'
 import ConfigDoc from './pages/ConfigDoc'
 import MediaRating from './pages/MediaRating'
+import ImageCopy from './pages/ImageCopy'
 import Changelog from './pages/Changelog'
 
 const { Content } = Layout
@@ -17,9 +18,9 @@ const edition = import.meta.env.VITE_EDITION || 'full'
 
 // 各版本可访问的路由
 const routePermissions: Record<string, string[]> = {
-  full: ['/classify', '/batch', '/rating', '/report', '/capture', '/autoclick', '/scheduled', '/config', '/changelog'],
-  work: ['/report', '/capture', '/autoclick', '/scheduled', '/changelog'],
-  normal: ['/classify', '/batch', '/rating', '/capture', '/autoclick', '/config', '/changelog'],
+  full: ['/classify', '/batch', '/imagecopy', '/rating', '/report', '/capture', '/autoclick', '/scheduled', '/config', '/changelog'],
+  work: ['/imagecopy', '/report', '/capture', '/autoclick', '/scheduled', '/changelog'],
+  normal: ['/classify', '/batch', '/imagecopy', '/rating', '/capture', '/autoclick', '/config', '/changelog'],
 }
 const allowedRoutes = routePermissions[edition] || routePermissions.full
 const canAccess = (path: string) => allowedRoutes.includes(path)
@@ -69,6 +70,11 @@ export default function App() {
           {canAccess('/batch') && (
             <div style={{ display: currentPath === '/batch' ? 'block' : 'none' }}>
               <BatchMove />
+            </div>
+          )}
+          {canAccess('/imagecopy') && (
+            <div style={{ display: currentPath === '/imagecopy' ? 'block' : 'none' }}>
+              <ImageCopy />
             </div>
           )}
           {canAccess('/rating') && (

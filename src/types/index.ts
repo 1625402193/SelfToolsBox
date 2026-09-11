@@ -52,6 +52,145 @@ interface ElectronAPI {
     ratingMap: Record<string, number>,
   ) => Promise<{ success: boolean; data?: { successCount: number; failCount: number; errors: string[] }; error?: string }>;
   mediaDeleteFile: (filePath: string, toTrash?: boolean) => Promise<{ success: boolean; error?: string }>;
+
+  // 批量复制图片
+  imageCopyBuildIndex: (targetPaths: string[], options?: ImageCopyOptions) =>
+    Promise<{ success: boolean; data?: ImageIndexData; error?: string }>;
+  imageCopyLoadIndex: (targetPaths?: string[]) => Promise<{ success: boolean; data?: ImageIndexData; error?: string }>;
+  imageCopyScanSources: (sourcePaths: string[], options?: ImageCopyOptions) =>
+    Promise<{ success: boolean; data?: ImageScanData; error?: string }>;
+  imageCopyMakePlan: () => Promise<{ success: boolean; data?: ImageCopyPlan; error?: string }>;
+  imageCopyCheckConflicts: (options: { choices?: Record<string, string>; unmatchedFolderName?: string }) =>
+    Promise<{ success: boolean; data?: { total: number; conflicts: ImageConflict[]; unmatchedDirs?: Record<string, string> }; error?: string }>;
+  imageCopyExecute: (options: {
+    choices?: Record<string, string>;
+    overwriteMode?: 'overwrite' | 'skip' | 'decide';
+    decisions?: Record<string, boolean>;
+    unmatchedFolderName?: string;
+  }) => Promise<{ success: boolean; data?: ImageCopyResult; error?: string }>;
+  imageCopyReadLog: (limit?: number) =>
+    Promise<{ success: boolean; data?: { logPath: string; entries: ImageCopyLogEntry[]; total?: number }; error?: string }>;
+  imageCopyAppendLog: (entry: Partial<ImageCopyLogEntry>) => Promise<{ success: boolean }>;
+  imageCopyClearLog: () => Promise<{ success: boolean; error?: string }>;
+}
+
+interface ImageCopyOptions {
+  keySegments?: number;
+  genericPrefixes?: string[];
+  recursive?: boolean;
+  oddSizeFolderName?: string;
+  unmatchedFolderName?: string;
+}
+
+interface ImageIndexEntry {
+  key: string;
+  display: string;
+  dirCount: number;
+  fileCount: number;
+  dirs: string[];
+}
+
+/** 单个目标路径的索引摘要：多个目标路径彼此独立，各有一份 */
+interface ImageRootIndex {
+  root: string;
+  updatedAt: string;
+  indexFile: string;
+  stats: { keyCount: number; dirCount: number; imageCount: number; multiDirKeyCount: number };
+  entries: ImageIndexEntry[];
+}
+
+interface ImageIndexData {
+  exists: boolean;
+  indexDir: string;
+  missing?: string[];
+  roots: ImageRootIndex[];
+}
+
+interface ImageScanFile {
+  name: string;
+  path: string;
+  width: number | null;
+  height: number | null;
+  sizeUnknown?: boolean;
+}
+
+interface ImageScanGroup {
+  key: string;
+  display: string;
+  fileCount: number;
+  files: ImageScanFile[];
+}
+
+interface ImageScanData {
+  scannedAt: string;
+  missing: string[];
+  total: number;
+  pending: number;
+  oddSizeFolder: string | null;
+  groups: ImageScanGroup[];
+  oddSized: { name: string; path: string; width: number | null; height: number | null }[];
+  unknownSize: { name: string; path: string }[];
+  duplicates: { name: string; dropped: string; kept: string }[];
+  logs: ImageCopyLogEntry[];
+}
+
+interface ImagePlanGroup {
+  key: string;
+  display: string;
+  fileCount: number;
+  fileNames: string[];
+  targetDir?: string;
+  candidates?: { dir: string; sampleCount: number }[];
+}
+
+/** 单个目标路径的复制计划 */
+interface ImageRootPlan {
+  root: string;
+  direct: ImagePlanGroup[];
+  ambiguous: ImagePlanGroup[];
+  unmatched: ImagePlanGroup[];
+}
+
+interface ImageCopyPlan {
+  roots: ImageRootPlan[];
+}
+
+interface ImageConflict {
+  root: string;
+  key: string;
+  display: string;
+  name: string;
+  src: string;
+  destPath: string;
+  existSize: number;
+  existTime: string;
+}
+
+interface ImageCopyRootResult {
+  root: string;
+  copied: number;
+  overwritten: number;
+  skipped: number;
+  failed: number;
+}
+
+interface ImageCopyResult {
+  total: number;
+  copied: number;
+  overwritten: number;
+  skipped: number;
+  failed: number;
+  unmatchedDirs: Record<string, string>;
+  perRoot: ImageCopyRootResult[];
+  logs: ImageCopyLogEntry[];
+}
+
+interface ImageCopyLogEntry {
+  time?: string;
+  action: string;
+  level: 'info' | 'success' | 'warn' | 'error';
+  message: string;
+  detail?: Record<string, any>;
 }
 
 interface MediaItem {
@@ -88,4 +227,9 @@ declare global {
   }
 }
 
-export type { ElectronAPI, ClassifyGroup, FileItem, MediaItem };
+export type {
+  ElectronAPI, ClassifyGroup, FileItem, MediaItem,
+  ImageCopyOptions, ImageIndexEntry, ImageRootIndex, ImageIndexData, ImageScanFile, ImageScanGroup,
+  ImageScanData, ImagePlanGroup, ImageRootPlan, ImageCopyPlan, ImageConflict,
+  ImageCopyRootResult, ImageCopyResult, ImageCopyLogEntry,
+};

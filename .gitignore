@@ -28,6 +28,12 @@ $null
 # 注：目录本身通过 .gitkeep 保留，程序首次运行会自动创建缺失的 txt
 electron/data/*.txt
 
+# 批量复制图片的本地索引与操作日志（首次使用时自动创建，仅保留在本地）
+electron/data/*.json
+electron/data/*.jsonl
+image-copy-index.json
+image-copy-log.jsonl
+
 # CodeBuddy 本地数据（notes.md 保留，其余本地缓存忽略）
 .codebuddy/teams/
 .codebuddy/automations/

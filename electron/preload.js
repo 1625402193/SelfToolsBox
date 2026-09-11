@@ -88,4 +88,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
   mediaExportByRating: (files, targetPath, isCopyMode, groupByRating, ratingMap) =>
     ipcRenderer.invoke('media:exportByRating', files, targetPath, isCopyMode, groupByRating, ratingMap),
   mediaDeleteFile: (filePath, toTrash) => ipcRenderer.invoke('media:deleteFile', filePath, toTrash),
+
+  // 批量复制图片
+  imageCopyBuildIndex: (targetPaths, options) => ipcRenderer.invoke('imageCopy:buildIndex', targetPaths, options),
+  imageCopyLoadIndex: (targetPaths) => ipcRenderer.invoke('imageCopy:loadIndex', targetPaths),
+  imageCopyScanSources: (sourcePaths, options) => ipcRenderer.invoke('imageCopy:scanSources', sourcePaths, options),
+  imageCopyMakePlan: () => ipcRenderer.invoke('imageCopy:makePlan'),
+  imageCopyCheckConflicts: (options) => ipcRenderer.invoke('imageCopy:checkConflicts', options),
+  imageCopyExecute: (options) => ipcRenderer.invoke('imageCopy:execute', options),
+  imageCopyReadLog: (limit) => ipcRenderer.invoke('imageCopy:readLog', limit),
+  imageCopyAppendLog: (entry) => ipcRenderer.invoke('imageCopy:appendLog', entry),
+  imageCopyClearLog: () => ipcRenderer.invoke('imageCopy:clearLog'),
 });

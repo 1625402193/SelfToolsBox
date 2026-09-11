@@ -10,6 +10,7 @@ import {
   ClockCircleOutlined,
   StarOutlined,
   PushpinOutlined,
+  PictureOutlined,
 } from '@ant-design/icons'
 
 const { Sider } = Layout
@@ -21,6 +22,7 @@ const edition = import.meta.env.VITE_EDITION || 'full'
 const allMenuItems = [
   { key: '/classify', icon: <FolderOutlined />, label: '文件分类', editions: ['full', 'normal'] },
   { key: '/batch', icon: <SwapOutlined />, label: '批量移动', editions: ['full', 'normal'] },
+  { key: '/imagecopy', icon: <PictureOutlined />, label: '批量复制图片', editions: ['full', 'work', 'normal'] },
   { key: '/rating', icon: <StarOutlined />, label: '媒体评分', editions: ['full', 'normal'] },
   { key: '/report', icon: <FileTextOutlined />, label: '日报周报', editions: ['full', 'work'] },
   { key: '/capture', icon: <CameraOutlined />, label: '截图录屏', editions: ['full', 'work', 'normal'] },
