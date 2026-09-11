@@ -93,7 +93,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   imageCopyBuildIndex: (targetPaths, options) => ipcRenderer.invoke('imageCopy:buildIndex', targetPaths, options),
   imageCopyLoadIndex: (targetPaths) => ipcRenderer.invoke('imageCopy:loadIndex', targetPaths),
   imageCopyScanSources: (sourcePaths, options) => ipcRenderer.invoke('imageCopy:scanSources', sourcePaths, options),
-  imageCopyMakePlan: () => ipcRenderer.invoke('imageCopy:makePlan'),
+  imageCopyMakePlan: (options) => ipcRenderer.invoke('imageCopy:makePlan', options),
   imageCopyCheckConflicts: (options) => ipcRenderer.invoke('imageCopy:checkConflicts', options),
   imageCopyExecute: (options) => ipcRenderer.invoke('imageCopy:execute', options),
   imageCopyReadLog: (limit) => ipcRenderer.invoke('imageCopy:readLog', limit),

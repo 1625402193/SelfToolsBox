@@ -59,7 +59,8 @@ interface ElectronAPI {
   imageCopyLoadIndex: (targetPaths?: string[]) => Promise<{ success: boolean; data?: ImageIndexData; error?: string }>;
   imageCopyScanSources: (sourcePaths: string[], options?: ImageCopyOptions) =>
     Promise<{ success: boolean; data?: ImageScanData; error?: string }>;
-  imageCopyMakePlan: () => Promise<{ success: boolean; data?: ImageCopyPlan; error?: string }>;
+  imageCopyMakePlan: (options?: { excludePaths?: string[] }) =>
+    Promise<{ success: boolean; data?: ImageCopyPlan; error?: string }>;
   imageCopyCheckConflicts: (options: { choices?: Record<string, string>; unmatchedFolderName?: string }) =>
     Promise<{ success: boolean; data?: { total: number; conflicts: ImageConflict[]; unmatchedDirs?: Record<string, string> }; error?: string }>;
   imageCopyExecute: (options: {
@@ -80,6 +81,8 @@ interface ImageCopyOptions {
   recursive?: boolean;
   oddSizeFolderName?: string;
   unmatchedFolderName?: string;
+  /** 是否把尺寸异常的图片额外复制一份到「尺寸异常」文件夹备查 */
+  copyOddSizeToFolder?: boolean;
 }
 
 interface ImageIndexEntry {
@@ -112,6 +115,8 @@ interface ImageScanFile {
   width: number | null;
   height: number | null;
   sizeUnknown?: boolean;
+  /** 宽高非 2 的倍数。不强制剔除，是否复制由用户选择 */
+  oddSized?: boolean;
 }
 
 interface ImageScanGroup {
@@ -128,7 +133,7 @@ interface ImageScanData {
   pending: number;
   oddSizeFolder: string | null;
   groups: ImageScanGroup[];
-  oddSized: { name: string; path: string; width: number | null; height: number | null }[];
+  oddSized: { name: string; path: string; width: number | null; height: number | null; display?: string }[];
   unknownSize: { name: string; path: string }[];
   duplicates: { name: string; dropped: string; kept: string }[];
   logs: ImageCopyLogEntry[];
@@ -153,6 +158,8 @@ interface ImageRootPlan {
 
 interface ImageCopyPlan {
   roots: ImageRootPlan[];
+  /** 按用户选择被排除、不复制的图片数量 */
+  excludedCount?: number;
 }
 
 interface ImageConflict {

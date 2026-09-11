@@ -1756,7 +1756,12 @@ const IMAGE_COPY_EXTS = new Set([
 // 提取分类键时跳过它们，改用后面的业务段（Icon_ShareTalk_xxx → 业务段 ShareTalk）
 const DEFAULT_GENERIC_PREFIXES = ['icon', 'img', 'image', 'ui', 'tex', 'texture', 'pic', 'sprite', 'spr', 'bg'];
 
-// 索引 / 日志文件均存放在 userData（软件本地目录），不随项目上传。
+// 索引 / 日志文件均存放在 userData（系统用户目录，如 %APPDATA%/file-classifier-tools/），
+// 位于项目仓库之外，git 无法触及，因此不会随项目上传。
+//
+// 【隐私】这些文件含有用户的完整本地磁盘路径与项目目录结构（属于个人/公司内部信息），
+// 必须只保留在本机。新增相关文件时一律写在 userData 下，禁止写入项目目录。
+//
 // 每个目标路径拥有独立的索引文件（以路径 hash 命名），互不干扰：
 // 多个目标路径是彼此独立的处理单元，检索、匹配、复制都各做各的，不做合并。
 function getImageCopyIndexDir() {
@@ -1772,7 +1777,8 @@ function getImageCopyLogPath() {
 
 // 主进程侧缓存：索引与扫描结果数据量较大，避免在 IPC 中反复往返传输
 // index 形如 { roots: [{ root, updatedAt, stats, entries }] }
-let imageCopyState = { index: null, scan: null, plan: null };
+// excludePaths 记录用户选择不复制的源图片（如尺寸异常图），仅用于日志回溯
+let imageCopyState = { index: null, scan: null, plan: null, excludePaths: [] };
 
 /**
  * 从文件头解析图片尺寸（不引入第三方依赖）。
@@ -2143,13 +2149,16 @@ ipcMain.handle('imageCopy:loadIndex', async (_event, targetPaths) => {
  * 检索源路径下的图片，完成三件事：
  * 1. 分类：按与索引一致的规则提取分类键
  * 2. 合并：跨源路径同名文件只保留创建/修改时间最新的一张
- * 3. 尺寸校验：宽高必须均为 2 的倍数，不合格的不参与后续复制，
- *    并复制到「首个源路径 / 尺寸文件夹」中（仅在确实存在不合格图片时才创建该文件夹）
+ * 3. 尺寸校验：宽高是否均为 2 的倍数。
+ *    注：尺寸异常的图片**不会**被强制剔除，只做标记（oddSized）并照常进入分类结果，
+ *    最终是否复制到目标路径由用户在界面上逐项选择（见 makePlan 的 excludePaths）。
+ *    可选地把这些图片额外复制一份到「首个源路径 / 尺寸异常」文件夹备查。
  */
 ipcMain.handle('imageCopy:scanSources', async (_event, sourcePaths, options) => {
   const opts = options || {};
   const recursive = opts.recursive !== false;
   const oddSizeFolderName = opts.oddSizeFolderName || '尺寸异常';
+  const copyOddSizeToFolder = opts.copyOddSizeToFolder !== false;
   const skipDirs = [oddSizeFolderName, opts.unmatchedFolderName];
 
   try {
@@ -2195,7 +2204,7 @@ ipcMain.handle('imageCopy:scanSources', async (_event, sourcePaths, options) => 
       duplicates.push({ name: drop.name, dropped: drop.path, kept: keep.path });
     }
 
-    // 尺寸校验 + 分类
+    // 尺寸校验 + 分类：所有图片都进入 files，尺寸异常的只做标记
     const files = [];
     const oddSized = [];
     const unknownSize = [];
@@ -2210,22 +2219,20 @@ ipcMain.handle('imageCopy:scanSources', async (_event, sourcePaths, options) => 
         height: size ? size.height : null,
       };
       if (!size) {
-        // 尺寸读不出来时不阻断流程，仅记录警告，仍参与复制
+        // 尺寸读不出来时仅记录警告，不影响复制
         record.sizeUnknown = true;
         unknownSize.push(record);
-        files.push(record);
       } else if (size.width % 2 !== 0 || size.height % 2 !== 0) {
         record.oddSized = true;
         oddSized.push(record);
-      } else {
-        files.push(record);
       }
+      files.push(record);
     }
 
-    // 存在尺寸异常图片时，复制到首个源路径下的尺寸文件夹
+    // 可选：把尺寸异常的图片额外复制一份到首个源路径下的尺寸文件夹，方便集中查看/修图
     let oddSizeFolder = null;
     const logs = [];
-    if (oddSized.length > 0) {
+    if (oddSized.length > 0 && copyOddSizeToFolder) {
       oddSizeFolder = path.join(valid[0], oddSizeFolderName);
       try {
         fs.mkdirSync(oddSizeFolder, { recursive: true });
@@ -2236,7 +2243,7 @@ ipcMain.handle('imageCopy:scanSources', async (_event, sourcePaths, options) => 
             logs.push({
               action: 'oddSize',
               level: 'warn',
-              message: `尺寸非 2 的倍数（${item.width}×${item.height}），已复制到尺寸异常文件夹：${item.name}`,
+              message: `尺寸非 2 的倍数（${item.width}×${item.height}），已另存一份到尺寸异常文件夹备查：${item.name}`,
               detail: { from: item.path },
             });
           } catch (e) {
@@ -2247,9 +2254,14 @@ ipcMain.handle('imageCopy:scanSources', async (_event, sourcePaths, options) => 
         oddSizeFolder = null;
         logs.push({ action: 'mkdir', level: 'error', message: `创建尺寸异常文件夹失败：${e.message}` });
       }
+    } else if (oddSized.length > 0) {
+      logs.push({
+        action: 'oddSize', level: 'warn',
+        message: `发现 ${oddSized.length} 张尺寸非 2 的倍数的图片（未另存到尺寸异常文件夹，可在选项中开启）`,
+      });
     }
 
-    // 按分类键聚合
+    // 按分类键聚合（含尺寸异常的图片）
     const groupMap = new Map();
     for (const f of files) {
       if (!groupMap.has(f.key)) groupMap.set(f.key, { key: f.key, display: f.display, files: [] });
@@ -2274,7 +2286,7 @@ ipcMain.handle('imageCopy:scanSources', async (_event, sourcePaths, options) => 
     logs.unshift({
       action: 'scanSources',
       level: 'success',
-      message: `扫描源路径完成：共 ${collected.length} 张图，合并重名 ${duplicates.length} 张，尺寸异常 ${oddSized.length} 张，待处理 ${files.length} 张，归为 ${groups.length} 个分类`,
+      message: `扫描源路径完成：共 ${collected.length} 张图，合并重名 ${duplicates.length} 张，待处理 ${files.length} 张（其中尺寸非 2 的倍数 ${oddSized.length} 张，是否复制由用户选择），归为 ${groups.length} 个分类`,
       detail: { sourcePaths: valid, missing },
     });
     appendImageCopyLog(logs);
@@ -2292,10 +2304,13 @@ ipcMain.handle('imageCopy:scanSources', async (_event, sourcePaths, options) => 
           display: g.display,
           fileCount: g.files.length,
           files: g.files.map(f => ({
-            name: f.name, path: f.path, width: f.width, height: f.height, sizeUnknown: !!f.sizeUnknown,
+            name: f.name, path: f.path, width: f.width, height: f.height,
+            sizeUnknown: !!f.sizeUnknown, oddSized: !!f.oddSized,
           })),
         })),
-        oddSized: oddSized.map(f => ({ name: f.name, path: f.path, width: f.width, height: f.height })),
+        oddSized: oddSized.map(f => ({
+          name: f.name, path: f.path, width: f.width, height: f.height, display: f.display,
+        })),
         unknownSize: unknownSize.map(f => ({ name: f.name, path: f.path })),
         duplicates,
         logs,
@@ -2342,8 +2357,11 @@ function choiceKey(root, key) {
  * - ambiguous：键在该路径内命中多个目录，需要用户选择
  * - unmatched：该路径的索引中没有这个键
  * 同一张图会分别复制到每个目标路径下各自对应的目录，互不影响。
+ *
+ * excludePaths: 用户勾掉的源图片绝对路径数组（主要用于尺寸异常图），这些图不进入计划。
  */
-ipcMain.handle('imageCopy:makePlan', async () => {
+ipcMain.handle('imageCopy:makePlan', async (_event, options) => {
+  const opts = options || {};
   try {
     const { index, scan } = imageCopyState;
     if (!index || !index.roots || index.roots.length === 0) {
@@ -2351,8 +2369,12 @@ ipcMain.handle('imageCopy:makePlan', async () => {
     }
     if (!scan) return { success: false, error: '尚未扫描源路径，请先执行「扫描源路径」' };
 
+    const excluded = new Set((opts.excludePaths || []).map(p => String(p).toLowerCase()));
+    imageCopyState.excludePaths = [...excluded];
+
     const rootPlans = [];
     const logs = [];
+    let excludedCount = 0;
 
     for (const rootIndex of index.roots) {
       const entries = rootIndex.entries || {};
@@ -2361,19 +2383,25 @@ ipcMain.handle('imageCopy:makePlan', async () => {
       const unmatched = [];
 
       for (const group of scan.groups) {
+        // 过滤掉用户选择不复制的图片；整组都被排除时跳过该分类
+        const files = excluded.size > 0
+          ? group.files.filter(f => !excluded.has(String(f.path).toLowerCase()))
+          : group.files;
+        if (files.length === 0) continue;
+
         const entry = entries[group.key];
         const dirs = entry ? (entry.dirs || []) : [];
         if (dirs.length === 1) {
-          direct.push({ key: group.key, display: group.display, targetDir: dirs[0].dir, files: group.files });
+          direct.push({ key: group.key, display: group.display, targetDir: dirs[0].dir, files });
         } else if (dirs.length > 1) {
           ambiguous.push({
             key: group.key,
             display: group.display,
             candidates: dirs.map(d => ({ dir: d.dir, sampleCount: (d.files || []).length })),
-            files: group.files,
+            files,
           });
         } else {
-          unmatched.push({ key: group.key, display: group.display, files: group.files });
+          unmatched.push({ key: group.key, display: group.display, files });
         }
       }
 
@@ -2386,7 +2414,15 @@ ipcMain.handle('imageCopy:makePlan', async () => {
       });
     }
 
-    const plan = { roots: rootPlans, createdAt: new Date().toISOString() };
+    if (excluded.size > 0) {
+      excludedCount = scan.files.filter(f => excluded.has(String(f.path).toLowerCase())).length;
+      logs.unshift({
+        action: 'makePlan', level: 'warn',
+        message: `按用户选择排除 ${excludedCount} 张图片，不复制到任何目标路径`,
+      });
+    }
+
+    const plan = { roots: rootPlans, excludedCount, createdAt: new Date().toISOString() };
     imageCopyState.plan = plan;
     appendImageCopyLog(logs);
 
@@ -2400,6 +2436,7 @@ ipcMain.handle('imageCopy:makePlan', async () => {
     return {
       success: true,
       data: {
+        excludedCount,
         roots: rootPlans.map(rp => ({
           root: rp.root,
           direct: rp.direct.map(g => ({ ...brief(g), targetDir: g.targetDir })),

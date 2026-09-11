@@ -28,11 +28,19 @@ $null
 # 注：目录本身通过 .gitkeep 保留，程序首次运行会自动创建缺失的 txt
 electron/data/*.txt
 
-# 批量复制图片的本地索引与操作日志（首次使用时自动创建，仅保留在本地）
+# 批量复制图片的本地索引与操作日志
+# 这些文件含有完整的本地磁盘路径与项目目录结构，属于个人数据，绝不上传。
+# 正常情况下它们只写在系统用户目录（%APPDATA%/file-classifier-tools/）下，
+# 这里的规则用于兜底，防止调试时把它们放进项目目录而误提交。
 electron/data/*.json
 electron/data/*.jsonl
-image-copy-index.json
-image-copy-log.jsonl
+image-copy-index/
+image-copy-index*.json
+image-copy-log*.jsonl
+批量复制图片日志*.txt
+
+# 应用配置（含用户自选的源/目标路径等个人信息）
+app-config.json
 
 # CodeBuddy 本地数据（notes.md 保留，其余本地缓存忽略）
 .codebuddy/teams/

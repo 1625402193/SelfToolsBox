@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
 import {
   Card, Button, Input, Switch, Table, Tag, Space, message, Modal, Alert,
-  InputNumber, Radio, Tooltip, Empty, Select, Divider,
+  InputNumber, Radio, Tooltip, Empty, Select, Divider, Checkbox,
 } from 'antd'
 import {
   FolderOpenOutlined, PlusOutlined, MinusCircleOutlined, ReloadOutlined,
   ScanOutlined, PlayCircleOutlined, DeleteOutlined, FolderOutlined,
-  DatabaseOutlined, ExportOutlined,
+  DatabaseOutlined, ExportOutlined, LockOutlined, WarningOutlined,
 } from '@ant-design/icons'
 import type {
   ImageIndexData, ImageScanData, ImageCopyPlan, ImageConflict, ImageCopyLogEntry, ImagePlanGroup,
@@ -94,6 +94,10 @@ export default function ImageCopy() {
   const [recursive, setRecursive] = useState(true)
   const [autoRebuildIndex, setAutoRebuildIndex] = useState(true)
   const [askOverwrite, setAskOverwrite] = useState(true)
+  // 尺寸非 2 的倍数时的处理方式：ask 逐张询问 / include 全部复制 / exclude 全部不复制
+  const [oddSizePolicy, setOddSizePolicy] = useState<'ask' | 'include' | 'exclude'>('ask')
+  // 是否把尺寸异常图额外复制一份到「尺寸异常」文件夹备查
+  const [copyOddSizeToFolder, setCopyOddSizeToFolder] = useState(true)
   const [oddSizeFolderName, setOddSizeFolderName] = useState(DEFAULT_ODD_FOLDER)
   const [unmatchedFolderName, setUnmatchedFolderName] = useState(DEFAULT_UNMATCHED_FOLDER)
 
@@ -119,8 +123,16 @@ export default function ImageCopy() {
   const [conflictDecisions, setConflictDecisions] = useState<Record<string, boolean>>({})
   const conflictResolver = useRef<((v: Record<string, boolean> | null) => void) | null>(null)
 
+  // 尺寸异常图的逐张选择弹窗：勾选表示复制，取消勾选表示不复制。
+  // viewOnly 为 true 时是「查看」模式（不参与流程，关闭即可，不影响后续执行）
+  const [oddSizeModal, setOddSizeModal] = useState<{ open: boolean; items: ImageScanData['oddSized']; viewOnly: boolean }>(
+    { open: false, items: [], viewOnly: false }
+  )
+  const [oddSizeChecked, setOddSizeChecked] = useState<Record<string, boolean>>({})
+  const oddSizeResolver = useRef<((v: string[] | null) => void) | null>(null)
+
   const options = () => ({
-    keySegments, recursive, oddSizeFolderName, unmatchedFolderName,
+    keySegments, recursive, oddSizeFolderName, unmatchedFolderName, copyOddSizeToFolder,
   })
 
   // ---------- 日志 ----------
@@ -155,6 +167,10 @@ export default function ImageCopy() {
           if (typeof saved.recursive === 'boolean') setRecursive(saved.recursive)
           if (typeof saved.autoRebuildIndex === 'boolean') setAutoRebuildIndex(saved.autoRebuildIndex)
           if (typeof saved.askOverwrite === 'boolean') setAskOverwrite(saved.askOverwrite)
+          if (saved.oddSizePolicy === 'ask' || saved.oddSizePolicy === 'include' || saved.oddSizePolicy === 'exclude') {
+            setOddSizePolicy(saved.oddSizePolicy)
+          }
+          if (typeof saved.copyOddSizeToFolder === 'boolean') setCopyOddSizeToFolder(saved.copyOddSizeToFolder)
           if (saved.oddSizeFolderName) setOddSizeFolderName(saved.oddSizeFolderName)
           if (saved.unmatchedFolderName) setUnmatchedFolderName(saved.unmatchedFolderName)
         }
@@ -180,13 +196,15 @@ export default function ImageCopy() {
           ...all,
           [CONFIG_KEY]: {
             sourcePaths, targetPaths, keySegments, recursive,
-            autoRebuildIndex, askOverwrite, oddSizeFolderName, unmatchedFolderName,
+            autoRebuildIndex, askOverwrite, oddSizePolicy, copyOddSizeToFolder,
+            oddSizeFolderName, unmatchedFolderName,
           },
         })
       } catch {}
     }, 600)
     return () => clearTimeout(timer)
-  }, [sourcePaths, targetPaths, keySegments, recursive, autoRebuildIndex, askOverwrite, oddSizeFolderName, unmatchedFolderName])
+  }, [sourcePaths, targetPaths, keySegments, recursive, autoRebuildIndex, askOverwrite,
+      oddSizePolicy, copyOddSizeToFolder, oddSizeFolderName, unmatchedFolderName])
 
   // ---------- 记录工具创建的文件夹，供界面快捷打开 ----------
   const addCreatedFolder = (label: string, folderPath?: string | null) => {
@@ -250,29 +268,46 @@ export default function ImageCopy() {
       pushLogs({ action: 'scanSources', level: 'warn', message: `以下源路径不存在，已跳过：${res.data.missing.join('、')}` })
     }
 
+    // 尺寸异常图已另存备查时，提供打开入口（不再意味着这些图被排除）
     if (res.data.oddSizeFolder) {
       addCreatedFolder('尺寸异常图片', res.data.oddSizeFolder)
-      Modal.warning({
-        title: '存在尺寸不是 2 的倍数的图片',
-        content: (
-          <div>
-            <p>共 {res.data.oddSized.length} 张图片尺寸不是 2 的倍数，这些图片不会复制到目标路径。</p>
-            <p>已复制到：<br /><code style={{ fontSize: 12 }}>{res.data.oddSizeFolder}</code></p>
-          </div>
-        ),
-        okText: '打开该文件夹',
-        cancelText: '知道了',
-        okCancel: true,
-        onOk: () => api.openPath(res.data!.oddSizeFolder!),
+      pushLogs({
+        action: 'oddSize', level: 'warn',
+        message: `${res.data.oddSized.length} 张尺寸非 2 的倍数的图片已另存一份到：${res.data.oddSizeFolder}（是否复制到目标路径仍由你决定）`,
       })
     }
     if (!silent) message.success(`扫描完成，待处理 ${res.data.pending} 张图`)
     return res.data
   }
 
+  // ---------- 尺寸异常图：让用户逐张选择是否复制 ----------
+  const askOddSize = (items: ImageScanData['oddSized']) =>
+    new Promise<string[] | null>(resolve => {
+      const defaults: Record<string, boolean> = {}
+      items.forEach(it => { defaults[it.path] = false }) // 默认不复制，需要时由用户勾选
+      setOddSizeChecked(defaults)
+      setOddSizeModal({ open: true, items, viewOnly: false })
+      oddSizeResolver.current = resolve
+    })
+
+  // 仅查看尺寸异常图清单，不参与流程
+  const viewOddSize = (items: ImageScanData['oddSized']) => {
+    const defaults: Record<string, boolean> = {}
+    items.forEach(it => { defaults[it.path] = false })
+    setOddSizeChecked(defaults)
+    setOddSizeModal({ open: true, items, viewOnly: true })
+  }
+
+  // 返回值是「排除的路径列表」
+  const closeOddSizeModal = (excluded: string[] | null) => {
+    setOddSizeModal({ open: false, items: [], viewOnly: false })
+    oddSizeResolver.current?.(excluded)
+    oddSizeResolver.current = null
+  }
+
   // ---------- 步骤 3：生成匹配计划（每个目标路径一份） ----------
-  const makePlan = async (): Promise<ImageCopyPlan | null> => {
-    const res = await api.imageCopyMakePlan()
+  const makePlan = async (excludePaths: string[] = []): Promise<ImageCopyPlan | null> => {
+    const res = await api.imageCopyMakePlan({ excludePaths })
     if (!res.success || !res.data) {
       logAction({ action: 'makePlan', level: 'error', message: `匹配失败：${res.error || '未知错误'}` })
       message.error(res.error || '匹配失败')
@@ -354,11 +389,41 @@ export default function ImageCopy() {
         return
       }
 
-      // 3. 匹配（每个目标路径各自一份计划）
-      const p = await makePlan()
+      // 3. 尺寸非 2 的倍数的图片：按策略决定是否复制（不再强制剔除）
+      let excludePaths: string[] = []
+      if (scan.oddSized.length > 0) {
+        if (oddSizePolicy === 'include') {
+          pushLogs({
+            action: 'oddSize', level: 'warn',
+            message: `${scan.oddSized.length} 张尺寸非 2 的倍数的图片按设置全部复制`,
+          })
+        } else if (oddSizePolicy === 'exclude') {
+          excludePaths = scan.oddSized.map(f => f.path)
+          pushLogs({
+            action: 'oddSize', level: 'warn',
+            message: `${scan.oddSized.length} 张尺寸非 2 的倍数的图片按设置全部不复制`,
+          })
+        } else {
+          const excluded = await askOddSize(scan.oddSized)
+          if (!excluded) {
+            message.info('已取消')
+            logAction({ action: 'flow', level: 'warn', message: '用户取消了尺寸异常图片的选择，流程中止' })
+            return
+          }
+          excludePaths = excluded
+          const keep = scan.oddSized.length - excluded.length
+          logAction({
+            action: 'oddSize', level: 'warn',
+            message: `尺寸异常图片用户选择：复制 ${keep} 张，不复制 ${excluded.length} 张`,
+          })
+        }
+      }
+
+      // 4. 匹配（每个目标路径各自一份计划）
+      const p = await makePlan(excludePaths)
       if (!p) return
 
-      // 4. 多目录键需要用户选择（按目标路径分别询问）
+      // 5. 多目录键需要用户选择（按目标路径分别询问）
       let choices: Record<string, string> = {}
       const ambiguousAll = p.roots.flatMap(rp => rp.ambiguous.map(g => ({ ...g, root: rp.root })))
       if (ambiguousAll.length > 0) {
@@ -380,7 +445,7 @@ export default function ImageCopy() {
         })
       }
 
-      // 5. 冲突确认（用户可在界面关闭询问，关闭时默认覆盖）
+      // 6. 冲突确认（用户可在界面关闭询问，关闭时默认覆盖）
       let overwriteMode: 'overwrite' | 'decide' = 'overwrite'
       let decisions: Record<string, boolean> = {}
       if (askOverwrite) {
@@ -399,7 +464,7 @@ export default function ImageCopy() {
         pushLogs({ action: 'flow', level: 'info', message: '覆盖询问已关闭，同名文件将直接覆盖' })
       }
 
-      // 6. 执行
+      // 7. 执行
       const res = await api.imageCopyExecute({ choices, overwriteMode, decisions, unmatchedFolderName })
       if (!res.success || !res.data) {
         logAction({ action: 'execute', level: 'error', message: `执行失败：${res.error || '未知错误'}` })
@@ -450,12 +515,28 @@ export default function ImageCopy() {
     message.success('日志已清空')
   }
 
-  const exportLogs = async () => {
-    const content = logs.slice().reverse()
-      .map(l => `[${l.time ? new Date(l.time).toLocaleString('zh-CN') : ''}] [${l.level}] ${l.message}`)
-      .join('\r\n')
-    const res = await api.exportJson({ defaultFileName: `批量复制图片日志_${Date.now()}.txt`, content })
-    if (res.success && !res.canceled) message.success('日志已导出')
+  // 导出日志前提示：日志正文含完整的本地/项目路径，属于个人信息，不应随意外发
+  const exportLogs = () => {
+    Modal.confirm({
+      title: '导出的日志包含完整文件路径',
+      content: (
+        <div>
+          <p>日志中会记录源路径、目标路径等完整的本地磁盘路径与项目目录结构。</p>
+          <p style={{ color: '#fa8c16', marginBottom: 0 }}>
+            这些信息仅供本机排查使用，请勿上传到公开仓库或分享给他人。
+          </p>
+        </div>
+      ),
+      okText: '我知道了，继续导出',
+      cancelText: '取消',
+      onOk: async () => {
+        const content = logs.slice().reverse()
+          .map(l => `[${l.time ? new Date(l.time).toLocaleString('zh-CN') : ''}] [${l.level}] ${l.message}`)
+          .join('\r\n')
+        const res = await api.exportJson({ defaultFileName: `批量复制图片日志_${Date.now()}.txt`, content })
+        if (res.success && !res.canceled) message.success('日志已导出')
+      },
+    })
   }
 
   const visibleLogs = logFilter === 'all' ? logs : logs.filter(l => l.level === logFilter)
@@ -488,8 +569,9 @@ export default function ImageCopy() {
           {files.map(f => (
             <span key={f.path} style={{ marginRight: 12 }}>
               {f.name}
-              <span style={{ color: '#bbb' }}>
+              <span style={{ color: f.oddSized ? '#fa8c16' : '#bbb' }}>
                 {f.sizeUnknown ? '（尺寸未知）' : ` (${f.width}×${f.height})`}
+                {f.oddSized && ' 非2倍数'}
               </span>
             </span>
           ))}
@@ -536,6 +618,31 @@ export default function ImageCopy() {
         <Divider style={{ margin: '12px 0' }} />
         <Space size="large" wrap>
           <Space>
+            <Tooltip title="宽高非 2 的倍数的图片不会被强制剔除，由你决定是否复制到目标路径">
+              <span>尺寸非 2 的倍数时：</span>
+            </Tooltip>
+            <Radio.Group
+              size="small"
+              value={oddSizePolicy}
+              onChange={e => setOddSizePolicy(e.target.value)}
+              optionType="button"
+              buttonStyle="solid"
+            >
+              <Radio.Button value="ask">逐张询问</Radio.Button>
+              <Radio.Button value="include">全部复制</Radio.Button>
+              <Radio.Button value="exclude">全部不复制</Radio.Button>
+            </Radio.Group>
+          </Space>
+          <Space>
+            <Tooltip title="开启后，尺寸非 2 的倍数的图片会额外复制一份到「尺寸异常」文件夹，便于集中查看或修图。与是否复制到目标路径互不影响">
+              <span>尺寸异常图另存备查：</span>
+            </Tooltip>
+            <Switch checked={copyOddSizeToFolder} onChange={setCopyOddSizeToFolder} />
+          </Space>
+        </Space>
+        <Divider style={{ margin: '12px 0' }} />
+        <Space size="large" wrap>
+          <Space>
             <span>尺寸异常文件夹名：</span>
             <Input value={oddSizeFolderName} onChange={e => setOddSizeFolderName(e.target.value)} style={{ width: 160 }} />
           </Space>
@@ -558,6 +665,11 @@ export default function ImageCopy() {
           <Button type="primary" icon={<PlayCircleOutlined />} loading={running} onClick={runFullFlow}>
             开始执行
           </Button>
+          {scanData && scanData.oddSized.length > 0 && (
+            <Button icon={<WarningOutlined />} onClick={() => viewOddSize(scanData.oddSized)}>
+              查看尺寸异常图（{scanData.oddSized.length}）
+            </Button>
+          )}
           {createdFolders.map(f => (
             <Button key={f.path} icon={<FolderOutlined />} onClick={() => api.openPath(f.path)}>
               打开{f.label}文件夹
@@ -599,10 +711,26 @@ export default function ImageCopy() {
             <Space wrap>
               <span>扫描结果：待处理 {scanData.pending} 张</span>
               <span>合并重名 {scanData.duplicates.length} 张</span>
-              <span style={{ color: scanData.oddSized.length ? '#fa8c16' : undefined }}>尺寸异常 {scanData.oddSized.length} 张</span>
+              <span style={{ color: scanData.oddSized.length ? '#fa8c16' : undefined }}>
+                尺寸非 2 的倍数 {scanData.oddSized.length} 张
+                {scanData.oddSized.length > 0 && (
+                  <span style={{ color: '#999' }}>
+                    （{oddSizePolicy === 'ask' ? '执行时逐张询问' : oddSizePolicy === 'include' ? '按设置全部复制' : '按设置全部不复制'}）
+                  </span>
+                )}
+              </span>
               {scanData.unknownSize.length > 0 && <span style={{ color: '#fa8c16' }}>尺寸未知 {scanData.unknownSize.length} 张</span>}
             </Space>
           }
+        />
+      )}
+
+      {plan && (plan.excludedCount ?? 0) > 0 && (
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginBottom: 16 }}
+          message={`已按你的选择排除 ${plan.excludedCount} 张图片，不复制到任何目标路径`}
         />
       )}
 
@@ -668,6 +796,19 @@ export default function ImageCopy() {
               </div>
             ))
           : <Empty description="尚未建立目标索引" image={Empty.PRESENTED_IMAGE_SIMPLE} />}
+
+        {/* 明示数据落地位置，便于确认这些路径信息不会随项目外泄 */}
+        {indexData?.indexDir && (
+          <div style={{ marginTop: 8, paddingTop: 8, borderTop: '1px solid #f0f0f0', fontSize: 12, color: '#999' }}>
+            <LockOutlined style={{ marginRight: 4 }} />
+            索引与操作日志仅保存在本机用户目录，不随项目上传：
+            <Tooltip title="点击打开该目录">
+              <a onClick={() => api.openPath(indexData.indexDir)} style={{ marginLeft: 4 }}>
+                {indexData.indexDir}
+              </a>
+            </Tooltip>
+          </div>
+        )}
       </Card>
 
       <Card
@@ -697,6 +838,86 @@ export default function ImageCopy() {
               ))}
         </div>
       </Card>
+
+      {/* 尺寸非 2 的倍数的图片：逐张选择是否复制（viewOnly 时仅查看清单） */}
+      <Modal
+        title={oddSizeModal.viewOnly ? '尺寸不是 2 的倍数的图片' : '有图片尺寸不是 2 的倍数'}
+        open={oddSizeModal.open}
+        width={780}
+        okText={oddSizeModal.viewOnly ? '关闭' : '按选择继续'}
+        cancelText="取消流程"
+        cancelButtonProps={{ style: oddSizeModal.viewOnly ? { display: 'none' } : undefined }}
+        onOk={() => oddSizeModal.viewOnly
+          ? setOddSizeModal({ open: false, items: [], viewOnly: false })
+          : closeOddSizeModal(oddSizeModal.items.filter(it => !oddSizeChecked[it.path]).map(it => it.path))}
+        onCancel={() => oddSizeModal.viewOnly
+          ? setOddSizeModal({ open: false, items: [], viewOnly: false })
+          : closeOddSizeModal(null)}
+      >
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginBottom: 12 }}
+          message={oddSizeModal.viewOnly
+            ? '这些图片宽高不是 2 的倍数，不会被自动剔除；是否复制到目标路径将在执行时按你的设置决定。'
+            : '勾选表示该图仍复制到目标路径，不勾选则跳过。默认全部不勾选。'}
+          description={
+            <span style={{ fontSize: 12 }}>
+              可在「选项 → 尺寸非 2 的倍数时」切换为「逐张询问」「全部复制」或「全部不复制」。
+            </span>
+          }
+        />
+        {!oddSizeModal.viewOnly && (
+          <Space style={{ marginBottom: 12 }}>
+            <Button size="small" onClick={() => {
+              const next: Record<string, boolean> = {}
+              oddSizeModal.items.forEach(it => { next[it.path] = true })
+              setOddSizeChecked(next)
+            }}>全选（都复制）</Button>
+            <Button size="small" onClick={() => {
+              const next: Record<string, boolean> = {}
+              oddSizeModal.items.forEach(it => { next[it.path] = false })
+              setOddSizeChecked(next)
+            }}>全不选（都跳过）</Button>
+            <span style={{ color: '#999', fontSize: 12 }}>
+              已选 {oddSizeModal.items.filter(it => oddSizeChecked[it.path]).length} / {oddSizeModal.items.length} 张
+            </span>
+          </Space>
+        )}
+        <Table
+          size="small"
+          rowKey="path"
+          dataSource={oddSizeModal.items}
+          pagination={{ pageSize: 8, showTotal: t => `共 ${t} 张` }}
+          columns={[
+            // 查看模式下不显示勾选列
+            ...(oddSizeModal.viewOnly ? [] : [{
+              title: '复制', key: 'check', width: 60,
+              render: (_: unknown, r: ImageScanData['oddSized'][0]) => (
+                <Checkbox
+                  checked={!!oddSizeChecked[r.path]}
+                  onChange={e => setOddSizeChecked(prev => ({ ...prev, [r.path]: e.target.checked }))}
+                />
+              ),
+            }]),
+            { title: '文件名', dataIndex: 'name', key: 'name', width: 220 },
+            {
+              title: '尺寸', key: 'size', width: 120,
+              render: (_: unknown, r) => (
+                <span style={{ color: '#fa8c16' }}>{r.width}×{r.height}</span>
+              ),
+            },
+            {
+              title: '分类', dataIndex: 'display', key: 'display', width: 150,
+              render: (v?: string) => v ? <Tag>{v}</Tag> : '-',
+            },
+            {
+              title: '源路径', dataIndex: 'path', key: 'path', ellipsis: true,
+              render: (v: string) => <Tooltip title={v}><span style={{ fontSize: 12, color: '#999' }}>{v}</span></Tooltip>,
+            },
+          ]}
+        />
+      </Modal>
 
       {/* 多目录选择 */}
       <Modal
