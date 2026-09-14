@@ -9,7 +9,8 @@ import {
   DatabaseOutlined, ExportOutlined, LockOutlined, WarningOutlined,
 } from '@ant-design/icons'
 import type {
-  ImageIndexData, ImageScanData, ImageCopyPlan, ImageConflict, ImageCopyLogEntry, ImagePlanGroup,
+  ImageIndexData, ImageScanData, ImageScanFile, ImageDirStat,
+  ImageCopyPlan, ImageConflict, ImageCopyLogEntry, ImagePlanGroup,
 } from '../types'
 
 const api = window.electronAPI
@@ -18,8 +19,16 @@ const DEFAULT_ODD_FOLDER = '尺寸异常'
 const DEFAULT_UNMATCHED_FOLDER = '未匹配'
 const CONFIG_KEY = 'imageCopy'
 
-// 多目录选择的复合键：目标路径 + 分类键，与主进程 choiceKey 保持一致
+// 多目录选择的复合键：目标路径 + 匹配键，与主进程 choiceKey 保持一致
 const choiceKey = (root: string, key: string) => `${root}||${key}`
+
+// 匹配方式的中文标签与配色，与主进程 VIA_LABEL 保持一致
+const VIA_LABEL: Record<string, string> = {
+  exact: '同名匹配', suffix: '后缀词匹配', prefix: '前缀匹配', size: '尺寸匹配', none: '未匹配',
+}
+const VIA_COLOR: Record<string, string> = {
+  exact: 'green', suffix: 'geekblue', prefix: 'blue', size: 'purple', none: 'red',
+}
 
 const levelColor: Record<string, string> = {
   success: '#52c41a', warn: '#faad14', error: '#ff4d4f', info: '#8c8c8c',
@@ -90,10 +99,21 @@ export default function ImageCopy() {
   const [targetPaths, setTargetPaths] = useState<string[]>([''])
 
   // 选项
-  const [keySegments, setKeySegments] = useState(1)
   const [recursive, setRecursive] = useState(true)
   const [autoRebuildIndex, setAutoRebuildIndex] = useState(true)
   const [askOverwrite, setAskOverwrite] = useState(true)
+  // 多级匹配开关（优先级：同名 → 后缀词 → 前缀回退 → 尺寸）
+  const [enableExactName, setEnableExactName] = useState(true)
+  const [enableSuffixMatch, setEnableSuffixMatch] = useState(true)
+  const [enablePrefixMatch, setEnablePrefixMatch] = useState(true)
+  const [enableSizeFallback, setEnableSizeFallback] = useState(true)
+  // 分辨率消歧后仍有多个候选时，是否自动取命中数量最多的目录
+  const [preferMostFiles, setPreferMostFiles] = useState(true)
+  // 后缀分类词与前缀回退的最短分段数
+  const [suffixWordsText, setSuffixWordsText] = useState('Fang,Yuan')
+  const [minSegments, setMinSegments] = useState(1)
+  // 同名且内容一致（大小 + MD5）时自动跳过，不询问
+  const [skipSameContent, setSkipSameContent] = useState(true)
   // 尺寸非 2 的倍数时的处理方式：ask 逐张询问 / include 全部复制 / exclude 全部不复制
   const [oddSizePolicy, setOddSizePolicy] = useState<'ask' | 'include' | 'exclude'>('ask')
   // 是否把尺寸异常图额外复制一份到「尺寸异常」文件夹备查
@@ -131,8 +151,19 @@ export default function ImageCopy() {
   const [oddSizeChecked, setOddSizeChecked] = useState<Record<string, boolean>>({})
   const oddSizeResolver = useRef<((v: string[] | null) => void) | null>(null)
 
+  // 后缀词文本 → 数组（逗号分隔，去空）
+  const suffixWords = suffixWordsText.split(/[,，\s]+/).map(s => s.trim()).filter(Boolean)
+
+  // 建索引与扫描共用的选项
   const options = () => ({
-    keySegments, recursive, oddSizeFolderName, unmatchedFolderName, copyOddSizeToFolder,
+    recursive, oddSizeFolderName, unmatchedFolderName, copyOddSizeToFolder,
+    suffixWords, minSegments,
+  })
+
+  // 匹配阶段的选项
+  const matchOptions = () => ({
+    enableExactName, enableSuffixMatch, enablePrefixMatch, enableSizeFallback,
+    preferMostFiles, suffixWords, minSegments,
   })
 
   // ---------- 日志 ----------
@@ -163,10 +194,17 @@ export default function ImageCopy() {
             setTargetPaths(saved.targetPaths)
             savedTargets = saved.targetPaths
           }
-          if (typeof saved.keySegments === 'number') setKeySegments(saved.keySegments)
           if (typeof saved.recursive === 'boolean') setRecursive(saved.recursive)
           if (typeof saved.autoRebuildIndex === 'boolean') setAutoRebuildIndex(saved.autoRebuildIndex)
           if (typeof saved.askOverwrite === 'boolean') setAskOverwrite(saved.askOverwrite)
+          if (typeof saved.enableExactName === 'boolean') setEnableExactName(saved.enableExactName)
+          if (typeof saved.enableSuffixMatch === 'boolean') setEnableSuffixMatch(saved.enableSuffixMatch)
+          if (typeof saved.enablePrefixMatch === 'boolean') setEnablePrefixMatch(saved.enablePrefixMatch)
+          if (typeof saved.enableSizeFallback === 'boolean') setEnableSizeFallback(saved.enableSizeFallback)
+          if (typeof saved.preferMostFiles === 'boolean') setPreferMostFiles(saved.preferMostFiles)
+          if (typeof saved.skipSameContent === 'boolean') setSkipSameContent(saved.skipSameContent)
+          if (typeof saved.suffixWordsText === 'string') setSuffixWordsText(saved.suffixWordsText)
+          if (typeof saved.minSegments === 'number') setMinSegments(saved.minSegments)
           if (saved.oddSizePolicy === 'ask' || saved.oddSizePolicy === 'include' || saved.oddSizePolicy === 'exclude') {
             setOddSizePolicy(saved.oddSizePolicy)
           }
@@ -195,15 +233,20 @@ export default function ImageCopy() {
         await api.configWrite?.({
           ...all,
           [CONFIG_KEY]: {
-            sourcePaths, targetPaths, keySegments, recursive,
-            autoRebuildIndex, askOverwrite, oddSizePolicy, copyOddSizeToFolder,
+            sourcePaths, targetPaths, recursive,
+            autoRebuildIndex, askOverwrite,
+            enableExactName, enableSuffixMatch, enablePrefixMatch, enableSizeFallback,
+            preferMostFiles, skipSameContent, suffixWordsText, minSegments,
+            oddSizePolicy, copyOddSizeToFolder,
             oddSizeFolderName, unmatchedFolderName,
           },
         })
       } catch {}
     }, 600)
     return () => clearTimeout(timer)
-  }, [sourcePaths, targetPaths, keySegments, recursive, autoRebuildIndex, askOverwrite,
+  }, [sourcePaths, targetPaths, recursive, autoRebuildIndex, askOverwrite,
+      enableExactName, enableSuffixMatch, enablePrefixMatch, enableSizeFallback,
+      preferMostFiles, skipSameContent, suffixWordsText, minSegments,
       oddSizePolicy, copyOddSizeToFolder, oddSizeFolderName, unmatchedFolderName])
 
   // ---------- 记录工具创建的文件夹，供界面快捷打开 ----------
@@ -234,7 +277,9 @@ export default function ImageCopy() {
     for (const r of res.data.roots) {
       pushLogs({
         action: 'buildIndex', level: 'success',
-        message: `索引已更新：${r.root} → ${r.stats.imageCount} 张图 / ${r.stats.keyCount} 个键（${r.stats.multiDirKeyCount} 个键在该路径内分布于多个目录）`,
+        message: `索引已更新：${r.root} → ${r.stats.imageCount} 张图，分布在 ${r.stats.dirCount} 个目录`
+          + `；查询表：同名 ${r.stats.nameKeyCount ?? 0} / 前缀 ${r.stats.prefixKeyCount ?? 0}`
+          + ` / 后缀词 ${r.stats.suffixKeyCount ?? 0} / 尺寸 ${r.stats.sizeKeyCount ?? 0}`,
       })
     }
     if (res.data.missing?.length) {
@@ -305,9 +350,9 @@ export default function ImageCopy() {
     oddSizeResolver.current = null
   }
 
-  // ---------- 步骤 3：生成匹配计划（每个目标路径一份） ----------
+  // ---------- 步骤 4：生成匹配计划（逐张多级匹配：同名 → 后缀词 → 前缀回退 → 尺寸） ----------
   const makePlan = async (excludePaths: string[] = []): Promise<ImageCopyPlan | null> => {
-    const res = await api.imageCopyMakePlan({ excludePaths })
+    const res = await api.imageCopyMakePlan({ excludePaths, ...matchOptions() })
     if (!res.success || !res.data) {
       logAction({ action: 'makePlan', level: 'error', message: `匹配失败：${res.error || '未知错误'}` })
       message.error(res.error || '匹配失败')
@@ -315,9 +360,16 @@ export default function ImageCopy() {
     }
     setPlan(res.data)
     for (const rp of res.data.roots) {
+      const viaParts = Object.entries(rp.viaCount || {})
+        .filter(([, n]) => (n ?? 0) > 0)
+        .map(([v, n]) => `${VIA_LABEL[v] || v} ${n} 张`)
       pushLogs({
         action: 'makePlan', level: 'info',
-        message: `匹配结果（${rp.root}）：直接命中 ${rp.direct.length} 个分类，需人工选择 ${rp.ambiguous.length} 个，未命中 ${rp.unmatched.length} 个`,
+        message: `匹配结果（${rp.root}）：已确定 ${rp.direct.reduce((s, g) => s + g.fileCount, 0)} 张，`
+          + `需人工选择 ${rp.ambiguous.reduce((s, g) => s + g.fileCount, 0)} 张，`
+          + `未匹配 ${rp.unmatched.reduce((s, g) => s + g.fileCount, 0)} 张`
+          + (viaParts.length ? `；${viaParts.join('、')}` : '')
+          + ((rp.autoResolvedCount ?? 0) > 0 ? `；${rp.autoResolvedCount} 张由分辨率自动消歧` : ''),
       })
     }
     return res.data
@@ -439,33 +491,41 @@ export default function ImageCopy() {
           if (dir) {
             pushLogs({
               action: 'choice', level: 'info',
-              message: `目标路径 ${g.root} 中，分类 ${g.display} 选择目录：${dir}`,
+              message: `目标路径 ${g.root} 中，${g.display} 选择目录：${dir}`,
             })
           }
         })
       }
 
-      // 6. 冲突确认（用户可在界面关闭询问，关闭时默认覆盖）
+      // 6. 冲突确认（内容相同的会自动跳过，不计入冲突）
       let overwriteMode: 'overwrite' | 'decide' = 'overwrite'
       let decisions: Record<string, boolean> = {}
       if (askOverwrite) {
-        const conflictRes = await api.imageCopyCheckConflicts({ choices, unmatchedFolderName })
-        if (conflictRes.success && conflictRes.data && conflictRes.data.conflicts.length > 0) {
-          const decided = await askConflicts(conflictRes.data.conflicts)
-          if (!decided) {
-            message.info('已取消')
-            logAction({ action: 'flow', level: 'warn', message: '用户取消了覆盖确认，流程中止' })
-            return
+        const conflictRes = await api.imageCopyCheckConflicts({ choices, unmatchedFolderName, skipSameContent })
+        if (conflictRes.success && conflictRes.data) {
+          if ((conflictRes.data.sameContentCount ?? 0) > 0) {
+            pushLogs({
+              action: 'checkConflicts', level: 'info',
+              message: `${conflictRes.data.sameContentCount} 张图与目标内容完全一致，将自动跳过（不再询问）`,
+            })
           }
-          overwriteMode = 'decide'
-          decisions = decided
+          if (conflictRes.data.conflicts.length > 0) {
+            const decided = await askConflicts(conflictRes.data.conflicts)
+            if (!decided) {
+              message.info('已取消')
+              logAction({ action: 'flow', level: 'warn', message: '用户取消了覆盖确认，流程中止' })
+              return
+            }
+            overwriteMode = 'decide'
+            decisions = decided
+          }
         }
       } else {
         pushLogs({ action: 'flow', level: 'info', message: '覆盖询问已关闭，同名文件将直接覆盖' })
       }
 
       // 7. 执行
-      const res = await api.imageCopyExecute({ choices, overwriteMode, decisions, unmatchedFolderName })
+      const res = await api.imageCopyExecute({ choices, overwriteMode, decisions, unmatchedFolderName, skipSameContent })
       if (!res.success || !res.data) {
         logAction({ action: 'execute', level: 'error', message: `执行失败：${res.error || '未知错误'}` })
         message.error(res.error || '执行失败')
@@ -480,15 +540,22 @@ export default function ImageCopy() {
         addCreatedFolder(label, dir)
       })
 
-      const { copied, overwritten, skipped, failed } = res.data
-      message.success(`复制完成：新增 ${copied}，覆盖 ${overwritten}，跳过 ${skipped}，失败 ${failed}`)
+      const { copied, overwritten, skipped, failed, sameContent } = res.data
+      message.success(
+        `复制完成：新增 ${copied}，替换 ${overwritten}`
+        + ((sameContent ?? 0) > 0 ? `，内容相同跳过 ${sameContent}` : '')
+        + `，跳过 ${skipped}，失败 ${failed}`
+      )
 
       if (unmatchedDirs.length > 0) {
         Modal.warning({
           title: '存在未匹配任何分类的图片',
           content: (
             <div>
-              <p>以下图片在对应目标路径的索引中找不到匹配的键，已按目标路径分别复制到：</p>
+              <p>
+                以下图片{enableSizeFallback ? '按名称和尺寸都没能匹配上' : '按名称没能匹配上'}，
+                已按目标路径分别复制到：
+              </p>
               {unmatchedDirs.map(([root, dir]) => (
                 <div key={root} style={{ marginBottom: 8 }}>
                   <div style={{ fontSize: 12, color: '#999' }}>目标路径：{root}</div>
@@ -542,41 +609,50 @@ export default function ImageCopy() {
   const visibleLogs = logFilter === 'all' ? logs : logs.filter(l => l.level === logFilter)
 
   // ---------- 表格列 ----------
-  const indexColumns = [
-    { title: '分类键', dataIndex: 'display', key: 'display', width: 220, render: (v: string) => <Tag color="blue">{v}</Tag> },
-    { title: '图片数', dataIndex: 'fileCount', key: 'fileCount', width: 80 },
+  // 目标索引：按目录维度展示（每个目录多少图、都是什么分辨率）
+  const dirStatColumns = [
     {
-      title: '所在目录', dataIndex: 'dirs', key: 'dirs',
-      render: (dirs: string[]) => (
-        <div>
-          {dirs.map(d => (
-            <div key={d} style={{ fontSize: 12, color: dirs.length > 1 ? '#fa8c16' : '#999' }}>
-              {dirs.length > 1 && <Tag color="orange" style={{ marginRight: 4 }}>多</Tag>}{d}
-            </div>
-          ))}
-        </div>
+      title: '子目录', dataIndex: 'relativeDir', key: 'relativeDir', width: 280, ellipsis: true,
+      render: (v: string, r: ImageDirStat) => (
+        <Tooltip title={r.dir}>
+          <a onClick={() => api.openPath(r.dir)}>{v}</a>
+        </Tooltip>
+      ),
+    },
+    {
+      title: '图片数', dataIndex: 'fileCount', key: 'fileCount', width: 90,
+      sorter: (a: ImageDirStat, b: ImageDirStat) => a.fileCount - b.fileCount,
+    },
+    {
+      title: '分辨率分布', dataIndex: 'resolutions', key: 'resolutions',
+      render: (list: ImageDirStat['resolutions']) => (
+        <Space wrap size={4}>
+          {list.length === 0
+            ? <span style={{ color: '#bbb', fontSize: 12 }}>-</span>
+            : list.map(r => <Tag key={r.res} color="purple">{r.res} × {r.count}</Tag>)}
+        </Space>
       ),
     },
   ]
 
+  // 源路径扫描结果：平铺展示每张待处理图片
   const scanColumns = [
-    { title: '分类键', dataIndex: 'display', key: 'display', width: 220, render: (v: string) => <Tag color="green">{v}</Tag> },
-    { title: '图片数', dataIndex: 'fileCount', key: 'fileCount', width: 80 },
+    { title: '文件名', dataIndex: 'name', key: 'name', width: 300, ellipsis: true },
     {
-      title: '图片', dataIndex: 'files', key: 'files',
-      render: (files: ImageScanData['groups'][0]['files']) => (
-        <div style={{ fontSize: 12, color: '#666' }}>
-          {files.map(f => (
-            <span key={f.path} style={{ marginRight: 12 }}>
-              {f.name}
-              <span style={{ color: f.oddSized ? '#fa8c16' : '#bbb' }}>
-                {f.sizeUnknown ? '（尺寸未知）' : ` (${f.width}×${f.height})`}
-                {f.oddSized && ' 非2倍数'}
-              </span>
+      title: '尺寸', key: 'size', width: 140,
+      render: (_: unknown, f: ImageScanFile) => (
+        f.sizeUnknown
+          ? <span style={{ color: '#fa8c16', fontSize: 12 }}>尺寸未知</span>
+          : (
+            <span style={{ color: f.oddSized ? '#fa8c16' : '#666', fontSize: 12 }}>
+              {f.width}×{f.height}{f.oddSized && ' 非2倍数'}
             </span>
-          ))}
-        </div>
+          )
       ),
+    },
+    {
+      title: '来源路径', dataIndex: 'path', key: 'path', ellipsis: true,
+      render: (v: string) => <Tooltip title={v}><span style={{ fontSize: 12, color: '#999' }}>{v}</span></Tooltip>,
     },
   ]
 
@@ -588,19 +664,12 @@ export default function ImageCopy() {
         <PathList label="源路径" paths={sourcePaths} onChange={setSourcePaths} />
       </Card>
 
-      <Card size="small" className="section-card" title="目标路径（建立分类索引的位置）">
+      <Card size="small" className="section-card" title="目标路径（建立索引的位置）">
         <PathList label="目标路径" paths={targetPaths} onChange={setTargetPaths} />
       </Card>
 
       <Card size="small" className="section-card" title="选项">
         <Space size="large" wrap>
-          <Space>
-            <Tooltip title="从文件名中取几个业务段作为分类键。取 1 段时 Icon_ShareTalk_01 与 Icon_ShareTalk_hero_02 同属 Icon_ShareTalk_ 分类；数值越大分类越精细">
-              <span>分类粒度：</span>
-            </Tooltip>
-            <InputNumber min={1} max={4} value={keySegments} onChange={v => setKeySegments(Number(v) || 1)} style={{ width: 70 }} />
-            <span style={{ color: '#999', fontSize: 12 }}>段</span>
-          </Space>
           <Space>包含子文件夹：<Switch checked={recursive} onChange={setRecursive} /></Space>
           <Space>
             <Tooltip title="开启后，点击「开始执行」会先自动重建目标索引，再进行后续流程">
@@ -614,8 +683,84 @@ export default function ImageCopy() {
             </Tooltip>
             <Switch checked={askOverwrite} onChange={setAskOverwrite} />
           </Space>
+          <Space>
+            <Tooltip title="目标已有同名文件且内容完全一致（大小 + MD5 相同）时直接跳过，不复制也不询问">
+              <span>内容相同自动跳过：</span>
+            </Tooltip>
+            <Switch checked={skipSameContent} onChange={setSkipSameContent} />
+          </Space>
         </Space>
-        <Divider style={{ margin: '12px 0' }} />
+      </Card>
+
+      <Card
+        size="small"
+        className="section-card"
+        title="匹配规则（按优先级逐级回退，命中即停）"
+      >
+        <Space direction="vertical" size={10} style={{ width: '100%' }}>
+          <Space size="large" wrap>
+            <Space>
+              <Tag color="green">1</Tag>
+              <Tooltip title="目标路径中已存在同名文件时，直接定位到该文件所在目录（替换场景）">
+                <span>同名精确匹配：</span>
+              </Tooltip>
+              <Switch checked={enableExactName} onChange={setEnableExactName} />
+            </Space>
+            <Space>
+              <Tag color="geekblue">2</Tag>
+              <Tooltip title="文件名以后缀词结尾时（如 _Fang / _Yuan），优先定位到「同前缀且同后缀」的资源所在目录，避免 Fang 与 Yuan 混淆">
+                <span>后缀词匹配：</span>
+              </Tooltip>
+              <Switch checked={enableSuffixMatch} onChange={setEnableSuffixMatch} />
+            </Space>
+            <Space>
+              <Tag color="blue">3</Tag>
+              <Tooltip title="按 _ 分段，从最长前缀逐级缩短，命中第一个存在已有资源的前缀（最精确的那一级）">
+                <span>前缀逐级回退：</span>
+              </Tooltip>
+              <Switch checked={enablePrefixMatch} onChange={setEnablePrefixMatch} />
+            </Space>
+            <Space>
+              <Tag color="purple">4</Tag>
+              <Tooltip title="以上都没命中时，用「尺寸 → 目录」索引兜底。读不出尺寸的图片不参与">
+                <span>尺寸兜底匹配：</span>
+              </Tooltip>
+              <Switch checked={enableSizeFallback} onChange={setEnableSizeFallback} />
+            </Space>
+          </Space>
+          <Space size="large" wrap>
+            <Space>
+              <Tooltip title="命中多个候选目录时，先用源图分辨率消歧（只保留含同分辨率资源的目录）。仍无法唯一确定时，开启本项会自动取命中数量最多的目录，关闭则弹窗让你选择">
+                <span>多目录时按数量自动决定：</span>
+              </Tooltip>
+              <Switch checked={preferMostFiles} onChange={setPreferMostFiles} />
+            </Space>
+            <Space>
+              <Tooltip title="后缀分类词，逗号分隔，大小写不敏感。清空可禁用后缀词匹配">
+                <span>后缀词：</span>
+              </Tooltip>
+              <Input
+                value={suffixWordsText}
+                onChange={e => setSuffixWordsText(e.target.value)}
+                placeholder="Fang,Yuan"
+                style={{ width: 160 }}
+              />
+            </Space>
+            <Space>
+              <Tooltip title="前缀逐级回退时允许的最短分段数。设为 1 表示允许退到单段前缀（如 Icon）">
+                <span>最短前缀分段：</span>
+              </Tooltip>
+              <InputNumber min={1} max={6} value={minSegments} onChange={v => setMinSegments(Number(v) || 1)} style={{ width: 70 }} />
+              <span style={{ color: '#999', fontSize: 12 }}>段</span>
+            </Space>
+          </Space>
+          <div style={{ fontSize: 12, color: '#999' }}>
+            命中多个候选目录时一律先用源图分辨率消歧，无法确定才询问你；全部规则都没命中的图片才放进「未匹配」文件夹。
+          </div>
+        </Space>
+      </Card>
+
+      <Card size="small" className="section-card" title="尺寸校验">
         <Space size="large" wrap>
           <Space>
             <Tooltip title="宽高非 2 的倍数的图片不会被强制剔除，由你决定是否复制到目标路径">
@@ -683,15 +828,16 @@ export default function ImageCopy() {
           type="info"
           showIcon
           style={{ marginBottom: 16 }}
-          message={<span>目标索引（{indexData.roots.length} 个目标路径，各自独立）</span>}
-          description={
+          message={<span>目标索引（{indexData.roots.length} 个目标路径，各自独立）</span>}          description={
             <div>
               {indexData.roots.map(r => (
                 <div key={r.root} style={{ fontSize: 12, marginBottom: 4 }}>
                   <Tag color="blue">{r.root}</Tag>
-                  {r.stats.keyCount} 个键 / {r.stats.imageCount} 张图
-                  {r.stats.multiDirKeyCount > 0 &&
-                    <span style={{ color: '#fa8c16' }}>，{r.stats.multiDirKeyCount} 个键在该路径内分布于多个目录（执行时需选择）</span>}
+                  {r.stats.imageCount} 张图
+                  <span style={{ color: '#666', marginLeft: 6 }}>
+                    查询表：同名 {r.stats.nameKeyCount ?? 0} / 前缀 {r.stats.prefixKeyCount ?? 0}
+                    {' / '}后缀词 {r.stats.suffixKeyCount ?? 0} / 尺寸 {r.stats.sizeKeyCount ?? 0}
+                  </span>
                   <span style={{ color: '#999', marginLeft: 8 }}>
                     更新于 {r.updatedAt ? new Date(r.updatedAt).toLocaleString('zh-CN') : '-'}
                   </span>
@@ -736,37 +882,58 @@ export default function ImageCopy() {
 
       {plan && (
         <Card size="small" className="section-card" title="匹配结果（按目标路径分别统计）">
-          {plan.roots.map(rp => (
-            <div key={rp.root} style={{ marginBottom: 12 }}>
-              <div style={{ marginBottom: 6 }}><Tag color="blue">{rp.root}</Tag></div>
-              <Space size="large" wrap>
-                <span>直接命中：<Tag color="green">{rp.direct.length}</Tag> 个分类</span>
-                <span>需人工选择：<Tag color="orange">{rp.ambiguous.length}</Tag> 个分类</span>
-                <span>未命中：<Tag color="red">{rp.unmatched.length}</Tag> 个分类</span>
-              </Space>
-              {rp.unmatched.length > 0 && (
-                <div style={{ marginTop: 6, fontSize: 12, color: '#999' }}>
-                  未命中分类：{rp.unmatched.map(g => g.display).join('、')}
+          {plan.roots.map(rp => {
+            const directFiles = rp.direct.reduce((s, g) => s + g.fileCount, 0)
+            const ambiguousFiles = rp.ambiguous.reduce((s, g) => s + g.fileCount, 0)
+            const unmatchedFiles = rp.unmatched.reduce((s, g) => s + g.fileCount, 0)
+            return (
+              <div key={rp.root} style={{ marginBottom: 16 }}>
+                <div style={{ marginBottom: 6 }}><Tag color="blue">{rp.root}</Tag></div>
+                <Space size="large" wrap>
+                  <span>已确定：<Tag color="green">{directFiles}</Tag> 张</span>
+                  <span>需人工选择：<Tag color="orange">{ambiguousFiles}</Tag> 张</span>
+                  <span>未匹配：<Tag color="red">{unmatchedFiles}</Tag> 张</span>
+                  {(rp.autoResolvedCount ?? 0) > 0 && (
+                    <span style={{ color: '#999', fontSize: 12 }}>
+                      （{rp.autoResolvedCount} 张由分辨率自动消歧）
+                    </span>
+                  )}
+                </Space>
+                {/* 各规则命中分布，直观看出主要靠哪一级规则 */}
+                <div style={{ marginTop: 8 }}>
+                  <Space wrap size={6}>
+                    {(['exact', 'suffix', 'prefix', 'size'] as const).map(v =>
+                      (rp.viaCount?.[v] ?? 0) > 0 ? (
+                        <Tag key={v} color={VIA_COLOR[v]}>{VIA_LABEL[v]} {rp.viaCount![v]} 张</Tag>
+                      ) : null
+                    )}
+                  </Space>
                 </div>
-              )}
-            </div>
-          ))}
+                {unmatchedFiles > 0 && (
+                  <div style={{ marginTop: 6, fontSize: 12, color: '#999' }}>
+                    未匹配图片：{rp.unmatched.flatMap(g => g.fileNames).slice(0, 8).join('、')}
+                    {unmatchedFiles > 8 && ` 等 ${unmatchedFiles} 张`}
+                  </div>
+                )}
+              </div>
+            )
+          })}
         </Card>
       )}
 
       <Card
         size="small"
         className="section-card"
-        title="源路径分类结果"
-        extra={scanData ? <span style={{ fontSize: 12, color: '#999' }}>{scanData.groups.length} 个分类</span> : null}
+        title="源路径待处理图片"
+        extra={scanData ? <span style={{ fontSize: 12, color: '#999' }}>{scanData.files.length} 张</span> : null}
       >
         {scanData
           ? <Table
               columns={scanColumns}
-              dataSource={scanData.groups}
-              rowKey="key"
+              dataSource={scanData.files}
+              rowKey="path"
               size="small"
-              pagination={{ pageSize: 10, showSizeChanger: true, showTotal: t => `共 ${t} 个分类` }}
+              pagination={{ pageSize: 10, showSizeChanger: true, showTotal: t => `共 ${t} 张图` }}
             />
           : <Empty description="尚未扫描源路径" image={Empty.PRESENTED_IMAGE_SIMPLE} />}
       </Card>
@@ -774,24 +941,26 @@ export default function ImageCopy() {
       <Card
         size="small"
         className="section-card"
-        title="目标索引明细"
+        title="目标路径目录分布"
         extra={indexData?.roots?.length
           ? <span style={{ fontSize: 12, color: '#999' }}>{indexData.roots.length} 个目标路径</span>
           : null}
       >
         {indexData?.roots?.length
           ? indexData.roots.map(r => (
-              <div key={r.root} style={{ marginBottom: 16 }}>
+              <div key={r.root} style={{ marginBottom: 20 }}>
                 <div style={{ marginBottom: 6 }}>
                   <Tag color="blue">{r.root}</Tag>
-                  <span style={{ fontSize: 12, color: '#999' }}>{r.entries.length} 个键</span>
+                  <span style={{ fontSize: 12, color: '#999' }}>
+                    {r.stats.imageCount} 张图分布在 {r.dirStats.length} 个目录
+                  </span>
                 </div>
                 <Table
-                  columns={indexColumns}
-                  dataSource={r.entries}
-                  rowKey="key"
+                  columns={dirStatColumns}
+                  dataSource={r.dirStats}
+                  rowKey="dir"
                   size="small"
-                  pagination={{ pageSize: 10, showSizeChanger: true, showTotal: t => `共 ${t} 个键` }}
+                  pagination={{ pageSize: 10, showSizeChanger: true, showTotal: t => `共 ${t} 个目录` }}
                 />
               </div>
             ))
@@ -933,7 +1102,12 @@ export default function ImageCopy() {
           type="warning"
           showIcon
           style={{ marginBottom: 12 }}
-          message="以下分类在对应目标路径内命中了多个目录，请分别选择本次要复制到哪个目录"
+          message="以下条目命中了多个候选目录，且用源图分辨率也无法唯一确定，请分别选择"
+          description={
+            <span style={{ fontSize: 12 }}>
+              选项中标注了各候选目录已有资源的分辨率，可据此判断该放哪个目录（如头像类常按分辨率区分 TouXiang / TouXiangLOD2）。
+            </span>
+          }
         />
         {/* 按目标路径分组展示，各目标路径的选择互不影响 */}
         {[...new Set(choiceModal.groups.map(g => g.root))].map(root => (
@@ -944,8 +1118,9 @@ export default function ImageCopy() {
             {choiceModal.groups.filter(g => g.root === root).map(g => (
               <div key={choiceKey(g.root, g.key)} style={{ marginBottom: 14, paddingLeft: 12 }}>
                 <div style={{ marginBottom: 6 }}>
-                  <Tag color="orange">{g.display}</Tag>
-                  <span style={{ color: '#999', fontSize: 12 }}>{g.fileCount} 张图：{g.fileNames.join('、')}</span>
+                  <Tag color={VIA_COLOR[g.via || 'none']}>{VIA_LABEL[g.via || 'none']}</Tag>
+                  <span style={{ fontSize: 12, color: '#666', marginRight: 8 }}>{g.display}</span>
+                  <span style={{ color: '#999', fontSize: 12 }}>{g.fileCount} 张图：{g.fileNames.slice(0, 6).join('、')}{g.fileCount > 6 ? ' …' : ''}</span>
                 </div>
                 <Select
                   style={{ width: '100%' }}
@@ -953,7 +1128,7 @@ export default function ImageCopy() {
                   onChange={v => setChoiceValues(prev => ({ ...prev, [choiceKey(g.root, g.key)]: v }))}
                   options={(g.candidates || []).map(c => ({
                     value: c.dir,
-                    label: `${c.dir}（已有 ${c.sampleCount} 张同类图）`,
+                    label: `${c.dir}（已有 ${c.sampleCount} 张${c.resolutions?.length ? `，分辨率 ${c.resolutions.join(' / ')}` : ''}）`,
                   }))}
                 />
               </div>
@@ -983,7 +1158,10 @@ export default function ImageCopy() {
             conflictModal.conflicts.forEach(c => { next[c.destPath] = false })
             setConflictDecisions(next)
           }}>全部跳过</Button>
-          <span style={{ color: '#999', fontSize: 12 }}>可在「选项 → 覆盖前询问」中关闭本弹窗</span>
+          <span style={{ color: '#999', fontSize: 12 }}>
+            {skipSameContent ? '内容完全相同的已自动跳过，此处仅列出内容不同的。' : ''}
+            可在「选项 → 覆盖前询问」中关闭本弹窗
+          </span>
         </Space>
         <Table
           size="small"
@@ -996,7 +1174,10 @@ export default function ImageCopy() {
               title: '目标路径', dataIndex: 'root', key: 'root', width: 150, ellipsis: true,
               render: (v: string) => <Tooltip title={v}><Tag color="blue">{v.split(/[\\/]/).pop() || v}</Tag></Tooltip>,
             },
-            { title: '分类', dataIndex: 'display', key: 'display', width: 150, render: (v: string) => <Tag>{v}</Tag> },
+            {
+              title: '匹配方式', dataIndex: 'via', key: 'via', width: 110,
+              render: (v?: string) => <Tag color={VIA_COLOR[v || 'none']}>{VIA_LABEL[v || 'none']}</Tag>,
+            },
             {
               title: '已存在文件', dataIndex: 'destPath', key: 'destPath', ellipsis: true,
               render: (v: string, r: ImageConflict) => (

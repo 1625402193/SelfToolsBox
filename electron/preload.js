@@ -82,20 +82,22 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
 
   // 媒体评分
+  mediaScanExtensions: (dirPath, options) => ipcRenderer.invoke('media:scanExtensions', dirPath, options),
   mediaScan: (dirPath, options) => ipcRenderer.invoke('media:scan', dirPath, options),
   mediaLoadRatings: (dirPath) => ipcRenderer.invoke('media:loadRatings', dirPath),
   mediaSaveRatings: (dirPath, ratings) => ipcRenderer.invoke('media:saveRatings', dirPath, ratings),
-  mediaExportByRating: (files, targetPath, isCopyMode, groupByRating, ratingMap) =>
-    ipcRenderer.invoke('media:exportByRating', files, targetPath, isCopyMode, groupByRating, ratingMap),
+  mediaExportByRating: (files, targetPath, isCopyMode, groupByRating, separateByType) =>
+    ipcRenderer.invoke('media:exportByRating', files, targetPath, isCopyMode, groupByRating, separateByType),
   mediaDeleteFile: (filePath, toTrash) => ipcRenderer.invoke('media:deleteFile', filePath, toTrash),
+  mediaDeleteFiles: (paths, toTrash) => ipcRenderer.invoke('media:deleteFiles', paths, toTrash),
+  mediaFindSiblings: (rootDir, items) => ipcRenderer.invoke('media:findSiblings', rootDir, items),
 
   // 批量复制图片
   imageCopyBuildIndex: (targetPaths, options) => ipcRenderer.invoke('imageCopy:buildIndex', targetPaths, options),
   imageCopyLoadIndex: (targetPaths) => ipcRenderer.invoke('imageCopy:loadIndex', targetPaths),
   imageCopyScanSources: (sourcePaths, options) => ipcRenderer.invoke('imageCopy:scanSources', sourcePaths, options),
   imageCopyMakePlan: (options) => ipcRenderer.invoke('imageCopy:makePlan', options),
-  imageCopyCheckConflicts: (options) => ipcRenderer.invoke('imageCopy:checkConflicts', options),
-  imageCopyExecute: (options) => ipcRenderer.invoke('imageCopy:execute', options),
+  imageCopyCheckConflicts: (options) => ipcRenderer.invoke('imageCopy:checkConflicts', options),  imageCopyExecute: (options) => ipcRenderer.invoke('imageCopy:execute', options),
   imageCopyReadLog: (limit) => ipcRenderer.invoke('imageCopy:readLog', limit),
   imageCopyAppendLog: (entry) => ipcRenderer.invoke('imageCopy:appendLog', entry),
   imageCopyClearLog: () => ipcRenderer.invoke('imageCopy:clearLog'),

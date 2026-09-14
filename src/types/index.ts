@@ -41,17 +41,27 @@ interface ElectronAPI {
   onMenuNavigate: (callback: (route: string) => void) => () => void;
 
   // 媒体评分
-  mediaScan: (dirPath: string, options?: { includeSubfolders?: boolean }) => Promise<{ success: boolean; data?: MediaItem[]; error?: string }>;
+  // 快速探测文件夹下各扩展名的文件数量（只读目录项，不做 stat，用于大文件夹的类型筛选面板）
+  mediaScanExtensions: (dirPath: string, options?: { includeSubfolders?: boolean }) =>
+    Promise<{ success: boolean; data?: Record<string, number>; error?: string }>;
+  // extensions 不传或为空时扫描全部识别的媒体类型；传入时只扫描选中的类型（未选中的完全不参与，性能更好）
+  mediaScan: (dirPath: string, options?: { includeSubfolders?: boolean; extensions?: string[] }) =>
+    Promise<{ success: boolean; data?: MediaItem[]; error?: string }>;
   mediaLoadRatings: (dirPath: string) => Promise<{ success: boolean; data?: Record<string, number>; error?: string }>;
   mediaSaveRatings: (dirPath: string, ratings: Record<string, number>) => Promise<{ success: boolean; error?: string }>;
   mediaExportByRating: (
-    files: { path: string; name: string; relativePath?: string }[],
+    files: { path: string; name: string; relativePath?: string; ratingLabel?: string }[],
     targetPath: string,
     isCopyMode: boolean,
     groupByRating: boolean,
-    ratingMap: Record<string, number>,
+    separateByType?: boolean,
   ) => Promise<{ success: boolean; data?: { successCount: number; failCount: number; errors: string[] }; error?: string }>;
   mediaDeleteFile: (filePath: string, toTrash?: boolean) => Promise<{ success: boolean; error?: string }>;
+  mediaDeleteFiles: (paths: string[], toTrash?: boolean) =>
+    Promise<{ success: boolean; data?: { successCount: number; failCount: number; errors: string[] }; error?: string }>;
+  // 查找与给定文件同目录、同基础名（不含扩展名）但类型不同的媒体文件（如 5099.jpg 对应的 5099.arw）
+  mediaFindSiblings: (rootDir: string, items: { dir: string; baseName: string }[]) =>
+    Promise<{ success: boolean; data?: Record<string, MediaSiblingFile[]>; error?: string }>;
 
   // 批量复制图片
   imageCopyBuildIndex: (targetPaths: string[], options?: ImageCopyOptions) =>
@@ -59,14 +69,15 @@ interface ElectronAPI {
   imageCopyLoadIndex: (targetPaths?: string[]) => Promise<{ success: boolean; data?: ImageIndexData; error?: string }>;
   imageCopyScanSources: (sourcePaths: string[], options?: ImageCopyOptions) =>
     Promise<{ success: boolean; data?: ImageScanData; error?: string }>;
-  imageCopyMakePlan: (options?: { excludePaths?: string[] }) =>
+  imageCopyMakePlan: (options?: { excludePaths?: string[] } & ImageMatchOptions) =>
     Promise<{ success: boolean; data?: ImageCopyPlan; error?: string }>;
-  imageCopyCheckConflicts: (options: { choices?: Record<string, string>; unmatchedFolderName?: string }) =>
-    Promise<{ success: boolean; data?: { total: number; conflicts: ImageConflict[]; unmatchedDirs?: Record<string, string> }; error?: string }>;
+  imageCopyCheckConflicts: (options: { choices?: Record<string, string>; unmatchedFolderName?: string; skipSameContent?: boolean }) =>
+    Promise<{ success: boolean; data?: { total: number; conflicts: ImageConflict[]; sameContentCount?: number; unmatchedDirs?: Record<string, string> }; error?: string }>;
   imageCopyExecute: (options: {
     choices?: Record<string, string>;
     overwriteMode?: 'overwrite' | 'skip' | 'decide';
     decisions?: Record<string, boolean>;
+    skipSameContent?: boolean;
     unmatchedFolderName?: string;
   }) => Promise<{ success: boolean; data?: ImageCopyResult; error?: string }>;
   imageCopyReadLog: (limit?: number) =>
@@ -76,21 +87,36 @@ interface ElectronAPI {
 }
 
 interface ImageCopyOptions {
-  keySegments?: number;
-  genericPrefixes?: string[];
   recursive?: boolean;
   oddSizeFolderName?: string;
   unmatchedFolderName?: string;
   /** 是否把尺寸异常的图片额外复制一份到「尺寸异常」文件夹备查 */
   copyOddSizeToFolder?: boolean;
+  /** 后缀分类词（如 Fang/Yuan），命中时优先定位到同前缀且同后缀的目录 */
+  suffixWords?: string[];
+  /** 前缀回退时允许的最短分段数 */
+  minSegments?: number;
 }
 
-interface ImageIndexEntry {
-  key: string;
-  display: string;
-  dirCount: number;
+/** 匹配方式：exact 同名 / suffix 后缀词 / prefix 前缀 / size 尺寸 / none 未命中 */
+type ImageMatchVia = 'exact' | 'suffix' | 'prefix' | 'size' | 'none';
+
+interface ImageMatchOptions {
+  enableExactName?: boolean;
+  enableSuffixMatch?: boolean;
+  enablePrefixMatch?: boolean;
+  enableSizeFallback?: boolean;
+  preferMostFiles?: boolean;
+  suffixWords?: string[];
+  minSegments?: number;
+}
+
+/** 目标路径下某个子目录的图片分布，用于界面展示 */
+interface ImageDirStat {
+  dir: string;
+  relativeDir: string;
   fileCount: number;
-  dirs: string[];
+  resolutions: { res: string; count: number }[];
 }
 
 /** 单个目标路径的索引摘要：多个目标路径彼此独立，各有一份 */
@@ -98,8 +124,16 @@ interface ImageRootIndex {
   root: string;
   updatedAt: string;
   indexFile: string;
-  stats: { keyCount: number; dirCount: number; imageCount: number; multiDirKeyCount: number };
-  entries: ImageIndexEntry[];
+  /** 尺寸索引的文件路径（单独存放） */
+  sizeIndexFile?: string;
+  stats: {
+    imageCount: number;
+    dirCount: number;
+    nameKeyCount?: number; prefixKeyCount?: number; suffixKeyCount?: number;
+    sizeKeyCount?: number; sizedImageCount?: number; multiDirSizeKeyCount?: number;
+  };
+  /** 各子目录的图片数与分辨率分布 */
+  dirStats: ImageDirStat[];
 }
 
 interface ImageIndexData {
@@ -112,18 +146,12 @@ interface ImageIndexData {
 interface ImageScanFile {
   name: string;
   path: string;
+  root?: string;
   width: number | null;
   height: number | null;
   sizeUnknown?: boolean;
   /** 宽高非 2 的倍数。不强制剔除，是否复制由用户选择 */
   oddSized?: boolean;
-}
-
-interface ImageScanGroup {
-  key: string;
-  display: string;
-  fileCount: number;
-  files: ImageScanFile[];
 }
 
 interface ImageScanData {
@@ -132,8 +160,9 @@ interface ImageScanData {
   total: number;
   pending: number;
   oddSizeFolder: string | null;
-  groups: ImageScanGroup[];
-  oddSized: { name: string; path: string; width: number | null; height: number | null; display?: string }[];
+  /** 合并后待处理的图片（平铺，不再按分类键分组） */
+  files: ImageScanFile[];
+  oddSized: { name: string; path: string; width: number | null; height: number | null }[];
   unknownSize: { name: string; path: string }[];
   duplicates: { name: string; dropped: string; kept: string }[];
   logs: ImageCopyLogEntry[];
@@ -145,7 +174,9 @@ interface ImagePlanGroup {
   fileCount: number;
   fileNames: string[];
   targetDir?: string;
-  candidates?: { dir: string; sampleCount: number }[];
+  candidates?: { dir: string; sampleCount: number; resolutions?: string[] }[];
+  /** 匹配来源 */
+  via?: ImageMatchVia;
 }
 
 /** 单个目标路径的复制计划 */
@@ -154,6 +185,10 @@ interface ImageRootPlan {
   direct: ImagePlanGroup[];
   ambiguous: ImagePlanGroup[];
   unmatched: ImagePlanGroup[];
+  /** 各匹配方式命中的图片数量 */
+  viaCount?: Partial<Record<ImageMatchVia, number>>;
+  /** 由分辨率自动消歧确定的图片数量 */
+  autoResolvedCount?: number;
 }
 
 interface ImageCopyPlan {
@@ -171,6 +206,7 @@ interface ImageConflict {
   destPath: string;
   existSize: number;
   existTime: string;
+  via?: ImageMatchVia;
 }
 
 interface ImageCopyRootResult {
@@ -178,6 +214,7 @@ interface ImageCopyRootResult {
   copied: number;
   overwritten: number;
   skipped: number;
+  sameContent?: number;
   failed: number;
 }
 
@@ -186,6 +223,8 @@ interface ImageCopyResult {
   copied: number;
   overwritten: number;
   skipped: number;
+  /** 同名且内容一致，自动跳过的数量 */
+  sameContent?: number;
   failed: number;
   unmatchedDirs: Record<string, string>;
   perRoot: ImageCopyRootResult[];
@@ -207,6 +246,17 @@ interface MediaItem {
   size: number;
   extension: string;
   type: 'image' | 'video';
+  modifyTime: string;
+}
+
+/** 同目录下与某文件同基础名但扩展名不同的媒体文件（如 5099.jpg 对应的 5099.arw） */
+interface MediaSiblingFile {
+  name: string;
+  path: string;
+  relativePath: string;
+  extension: string;
+  type: 'image' | 'video';
+  size: number;
   modifyTime: string;
 }
 
@@ -235,8 +285,9 @@ declare global {
 }
 
 export type {
-  ElectronAPI, ClassifyGroup, FileItem, MediaItem,
-  ImageCopyOptions, ImageIndexEntry, ImageRootIndex, ImageIndexData, ImageScanFile, ImageScanGroup,
+  ElectronAPI, ClassifyGroup, FileItem, MediaItem, MediaSiblingFile,
+  ImageCopyOptions, ImageMatchOptions, ImageMatchVia,
+  ImageDirStat, ImageRootIndex, ImageIndexData, ImageScanFile,
   ImageScanData, ImagePlanGroup, ImageRootPlan, ImageCopyPlan, ImageConflict,
   ImageCopyRootResult, ImageCopyResult, ImageCopyLogEntry,
 };
