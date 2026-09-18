@@ -2767,7 +2767,18 @@ ipcMain.handle('imageCopy:makePlan', async (_event, options) => {
     const logs = [];
     let excludedCount = 0;
 
-    for (const rootIndex of index.roots) {
+    // 仅对启用的目标路径生成计划（opts.targets 为前端过滤后的启用列表；临时停用的路径保留配置但不参与）
+    const wanted = Array.isArray(opts.targets)
+      ? new Set(opts.targets.map(p => String(p || '').trim()).filter(Boolean).map(p => p.toLowerCase()))
+      : null;
+    const roots = wanted
+      ? index.roots.filter(r => wanted.has(String(r.root || '').trim().toLowerCase()))
+      : index.roots;
+    if (roots.length === 0) {
+      return { success: false, error: '没有已启用的目标路径（可能全部被临时停用），请至少启用一个' };
+    }
+
+    for (const rootIndex of roots) {
       // 按「目标目录 + 匹配方式」聚合已确定的图片，减少界面条目
       const directBuckets = new Map();
       // 需要用户选择的按「匹配键 + 匹配方式」聚合

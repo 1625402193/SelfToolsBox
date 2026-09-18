@@ -47,10 +47,12 @@ function fmtSize(bytes: number) {
   return (bytes / (1024 * 1024)).toFixed(1) + ' MB'
 }
 
-/** 多路径编辑器：支持任意数量的源/目标路径 */
-function PathList({ label, paths, onChange }: {
+/** 多路径编辑器：支持任意数量的源/目标路径；flags 可选，true 表示该行临时停用（保留配置，不参与执行） */
+function PathList({ label, paths, flags, onFlagChange, onChange }: {
   label: string
   paths: string[]
+  flags?: boolean[]
+  onFlagChange?: (idx: number, disabled: boolean) => void
   onChange: (next: string[]) => void
 }) {
   const browse = async (idx: number) => {
@@ -62,30 +64,43 @@ function PathList({ label, paths, onChange }: {
   }
   return (
     <div>
-      {paths.map((p, idx) => (
-        <div key={idx} style={{ display: 'flex', gap: 8, marginBottom: 8, alignItems: 'center' }}>
-          <span style={{ width: 78, color: '#666', fontSize: 13 }}>
-            {label} {idx + 1}{idx === 0 ? ' *' : ''}
-          </span>
-          <Input
-            value={p}
-            placeholder={idx === 0 ? `选择${label}（首个${label}用于存放尺寸异常/未匹配图片）` : `选择${label}`}
-            onChange={e => {
-              const next = [...paths]
-              next[idx] = e.target.value
-              onChange(next)
-            }}
-            style={{ flex: 1 }}
-          />
-          <Button icon={<FolderOpenOutlined />} onClick={() => browse(idx)}>浏览</Button>
-          <Button
-            icon={<MinusCircleOutlined />}
-            danger
-            disabled={paths.length <= 1}
-            onClick={() => onChange(paths.filter((_, i) => i !== idx))}
-          />
-        </div>
-      ))}
+      {paths.map((p, idx) => {
+        const off = !!flags?.[idx]
+        return (
+          <div key={idx} style={{ display: 'flex', gap: 8, marginBottom: 8, alignItems: 'center' }}>
+            <span style={{ width: 78, color: '#666', fontSize: 13 }}>
+              {label} {idx + 1}{idx === 0 ? ' *' : ''}
+            </span>
+            <Input
+              value={p}
+              placeholder={idx === 0 ? `选择${label}（首个${label}用于存放尺寸异常/未匹配图片）` : `选择${label}`}
+              onChange={e => {
+                const next = [...paths]
+                next[idx] = e.target.value
+                onChange(next)
+              }}
+              style={{ flex: 1, opacity: off ? 0.45 : 1 }}
+            />
+            <Button icon={<FolderOpenOutlined />} onClick={() => browse(idx)}>浏览</Button>
+            {onFlagChange && (
+              <Tooltip title={off
+                ? '已临时停用：保留路径配置，不参与索引与复制，可随时重新开启（无需删除后重选）'
+                : '临时停用该目标路径：保留配置但不参与索引与复制，避免删除后重新选择'}>
+                <Space size={4} style={{ opacity: off ? 0.6 : 1 }}>
+                  <span style={{ fontSize: 12, color: off ? '#999' : '#666' }}>启用</span>
+                  <Switch size="small" checked={!off} onChange={v => onFlagChange(idx, !v)} />
+                </Space>
+              </Tooltip>
+            )}
+            <Button
+              icon={<MinusCircleOutlined />}
+              danger
+              disabled={paths.length <= 1}
+              onClick={() => onChange(paths.filter((_, i) => i !== idx))}
+            />
+          </div>
+        )
+      })}
       <Button type="dashed" icon={<PlusOutlined />} onClick={() => onChange([...paths, ''])} style={{ width: 200 }}>
         添加{label}
       </Button>
@@ -97,6 +112,8 @@ export default function ImageCopy() {
   // 路径
   const [sourcePaths, setSourcePaths] = useState<string[]>([''])
   const [targetPaths, setTargetPaths] = useState<string[]>([''])
+  // 目标路径临时停用标记（与 targetPaths 下标对齐，true = 停用：保留配置但不参与索引与复制）
+  const [disabledTargets, setDisabledTargets] = useState<boolean[]>([])
 
   // 选项
   const [recursive, setRecursive] = useState(true)
@@ -166,6 +183,19 @@ export default function ImageCopy() {
     preferMostFiles, suffixWords, minSegments,
   })
 
+  /** 当前参与执行的目标路径（过滤空值与临时停用项） */
+  const activeTargets = () =>
+    targetPaths
+      .map((p, i) => ({ p: String(p || '').trim(), i }))
+      .filter(x => x.p && !disabledTargets[x.i])
+      .map(x => x.p)
+
+  /** 更新目标路径列表，同时保持停用标记与列表长度对齐 */
+  const updateTargetPaths = (next: string[]) => {
+    setTargetPaths(next)
+    setDisabledTargets(prev => next.map((_, i) => prev[i] ?? false))
+  }
+
   // ---------- 日志 ----------
   const pushLogs = (entries: ImageCopyLogEntry[] | ImageCopyLogEntry) => {
     const list = (Array.isArray(entries) ? entries : [entries]).map(e => ({
@@ -180,11 +210,38 @@ export default function ImageCopy() {
     api.imageCopyAppendLog?.(entry)
   }
 
+  /** 临时停用/重新启用某个目标路径（保留配置，只影响本次及之后的执行） */
+  const toggleTargetDisabled = (idx: number, disabled: boolean) => {
+    const nextFlags = [...disabledTargets]
+    while (nextFlags.length <= idx) nextFlags.push(false)
+    nextFlags[idx] = disabled
+    setDisabledTargets(nextFlags)
+    const pathLabel = String(targetPaths[idx] || '').trim() || '(未填写)'
+    logAction({
+      action: 'flow', level: 'info',
+      message: disabled
+        ? `临时停用目标路径：${pathLabel}（保留配置，不参与索引与复制）`
+        : `重新启用目标路径：${pathLabel}`,
+    })
+    // 立即同步主进程索引缓存与界面索引展示，避免沿用被停用路径的旧索引
+    ;(async () => {
+      const targets = targetPaths
+        .map((p, i) => ({ p: String(p || '').trim(), i }))
+        .filter(x => x.p && !(x.i === idx ? disabled : nextFlags[x.i]))
+        .map(x => x.p)
+      if (targets.length === 0) { setIndexData(null); return }
+      const res = await api.imageCopyLoadIndex?.(targets)
+      if (res?.success && res.data?.exists) setIndexData(res.data)
+      else setIndexData(null)
+    })()
+  }
+
   // ---------- 初始化：恢复配置 + 读取已有索引和历史日志 ----------
   useEffect(() => {
     let cancelled = false
     ;(async () => {
       let savedTargets: string[] = []
+      let savedDisabled: boolean[] = []
       try {
         const cfg = await api.configRead?.()
         const saved = cfg?.data?.[CONFIG_KEY]
@@ -193,6 +250,10 @@ export default function ImageCopy() {
           if (Array.isArray(saved.targetPaths) && saved.targetPaths.length) {
             setTargetPaths(saved.targetPaths)
             savedTargets = saved.targetPaths
+          }
+          if (Array.isArray(saved.disabledTargets)) {
+            savedDisabled = saved.disabledTargets.map(Boolean)
+            setDisabledTargets(savedDisabled)
           }
           if (typeof saved.recursive === 'boolean') setRecursive(saved.recursive)
           if (typeof saved.autoRebuildIndex === 'boolean') setAutoRebuildIndex(saved.autoRebuildIndex)
@@ -214,8 +275,12 @@ export default function ImageCopy() {
         }
       } catch {}
 
-      // 只加载当前配置的目标路径对应的索引（每个目标路径一份，互相独立）
-      const idx = await api.imageCopyLoadIndex?.(savedTargets.map(p => String(p).trim()).filter(Boolean))
+      // 只加载当前配置中已启用的目标路径对应的索引（每个目标路径一份，互相独立）
+      const targetsToLoad = savedTargets
+        .map((p, i) => ({ p: String(p || '').trim(), i }))
+        .filter(x => x.p && !savedDisabled[x.i])
+        .map(x => x.p)
+      const idx = targetsToLoad.length ? await api.imageCopyLoadIndex?.(targetsToLoad) : null
       if (!cancelled && idx?.success && idx.data?.exists) setIndexData(idx.data)
 
       const lg = await api.imageCopyReadLog?.(300)
@@ -233,7 +298,8 @@ export default function ImageCopy() {
         await api.configWrite?.({
           ...all,
           [CONFIG_KEY]: {
-            sourcePaths, targetPaths, recursive,
+            sourcePaths, targetPaths, disabledTargets,
+            recursive,
             autoRebuildIndex, askOverwrite,
             enableExactName, enableSuffixMatch, enablePrefixMatch, enableSizeFallback,
             preferMostFiles, skipSameContent, suffixWordsText, minSegments,
@@ -244,7 +310,7 @@ export default function ImageCopy() {
       } catch {}
     }, 600)
     return () => clearTimeout(timer)
-  }, [sourcePaths, targetPaths, recursive, autoRebuildIndex, askOverwrite,
+  }, [sourcePaths, targetPaths, disabledTargets, recursive, autoRebuildIndex, askOverwrite,
       enableExactName, enableSuffixMatch, enablePrefixMatch, enableSizeFallback,
       preferMostFiles, skipSameContent, suffixWordsText, minSegments,
       oddSizePolicy, copyOddSizeToFolder, oddSizeFolderName, unmatchedFolderName])
@@ -257,9 +323,11 @@ export default function ImageCopy() {
 
   // ---------- 步骤 1：重建目标索引（每个目标路径分别建立，互相独立） ----------
   const buildIndex = async (silent = false): Promise<ImageIndexData | null> => {
-    const valid = targetPaths.map(p => p.trim()).filter(Boolean)
+    const valid = activeTargets()
     if (valid.length === 0) {
-      message.warning('请至少选择一个目标路径')
+      message.warning(disabledTargets.some(Boolean)
+        ? '没有已启用的目标路径（临时停用的不算），请至少启用一个'
+        : '请至少选择一个目标路径')
       return null
     }
     setIndexing(true)
@@ -352,7 +420,13 @@ export default function ImageCopy() {
 
   // ---------- 步骤 4：生成匹配计划（逐张多级匹配：同名 → 后缀词 → 前缀回退 → 尺寸） ----------
   const makePlan = async (excludePaths: string[] = []): Promise<ImageCopyPlan | null> => {
-    const res = await api.imageCopyMakePlan({ excludePaths, ...matchOptions() })
+    const targets = activeTargets()
+    if (targets.length === 0) {
+      logAction({ action: 'makePlan', level: 'error', message: '匹配中止：所有目标路径均已临时停用' })
+      message.warning('所有目标路径均已临时停用，请至少启用一个')
+      return null
+    }
+    const res = await api.imageCopyMakePlan({ excludePaths, targets, ...matchOptions() })
     if (!res.success || !res.data) {
       logAction({ action: 'makePlan', level: 'error', message: `匹配失败：${res.error || '未知错误'}` })
       message.error(res.error || '匹配失败')
@@ -664,8 +738,14 @@ export default function ImageCopy() {
         <PathList label="源路径" paths={sourcePaths} onChange={setSourcePaths} />
       </Card>
 
-      <Card size="small" className="section-card" title="目标路径（建立索引的位置）">
-        <PathList label="目标路径" paths={targetPaths} onChange={setTargetPaths} />
+      <Card size="small" className="section-card" title="目标路径（建立索引的位置，可用开关临时停用）">
+        <PathList
+          label="目标路径"
+          paths={targetPaths}
+          flags={disabledTargets}
+          onFlagChange={toggleTargetDisabled}
+          onChange={updateTargetPaths}
+        />
       </Card>
 
       <Card size="small" className="section-card" title="选项">

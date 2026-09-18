@@ -69,7 +69,7 @@ interface ElectronAPI {
   imageCopyLoadIndex: (targetPaths?: string[]) => Promise<{ success: boolean; data?: ImageIndexData; error?: string }>;
   imageCopyScanSources: (sourcePaths: string[], options?: ImageCopyOptions) =>
     Promise<{ success: boolean; data?: ImageScanData; error?: string }>;
-  imageCopyMakePlan: (options?: { excludePaths?: string[] } & ImageMatchOptions) =>
+  imageCopyMakePlan: (options?: { excludePaths?: string[]; targets?: string[] } & ImageMatchOptions) =>
     Promise<{ success: boolean; data?: ImageCopyPlan; error?: string }>;
   imageCopyCheckConflicts: (options: { choices?: Record<string, string>; unmatchedFolderName?: string; skipSameContent?: boolean }) =>
     Promise<{ success: boolean; data?: { total: number; conflicts: ImageConflict[]; sameContentCount?: number; unmatchedDirs?: Record<string, string> }; error?: string }>;
