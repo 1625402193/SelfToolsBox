@@ -53,6 +53,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // SVN 批量更新
   selectFile: (options) => ipcRenderer.invoke('dialog:openFile', options),
   svnUpdate: (dirPath) => ipcRenderer.invoke('svn:update', dirPath),
+  // 拉起 TortoiseSVN 提交窗口（批量复制图片执行完成后使用）
+  svnCommit: (options) => ipcRenderer.invoke('svn:commit', options),
   runBat: (batPath) => ipcRenderer.invoke('svn:runBat', batPath),
 
   // 电源管理（防止系统休眠，用于定时任务）

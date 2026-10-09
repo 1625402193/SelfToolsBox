@@ -43,8 +43,13 @@ function baseNameOf(name: string, extension: string) {
     : name
 }
 
+// 规范化目录用于同名兄弟匹配的键：统一分隔符 + 小写（Windows 大小写不敏感）
+function normDir(dir: string) {
+  return String(dir || '').replace(/[\\/]+$/, '').replace(/\\/g, '/').toLowerCase()
+}
+
 function siblingKey(dir: string, baseName: string) {
-  return `${dir}||${baseName.toLowerCase()}`
+  return `${normDir(dir)}||${baseName.toLowerCase()}`
 }
 
 function ratingLabelOf(ratings: Record<string, number>, relativePath: string) {
@@ -107,6 +112,12 @@ export default function MediaRating() {
   // 按评分删除配置
   const [deleteRatings, setDeleteRatings] = useState<string[]>([])
   const [deleting, setDeleting] = useState(false)
+  // 自动一并处理同名不同类型的兄弟文件（默认开启）：
+  //   - 开启：删除/导出时若检测到同名不同类型文件（如 5099.jpg 对应的 5099.arw），
+  //     无论其类型是否在预览类型中，直接合并处理，最终二次确认弹窗会显示合计数量。
+  //   - 关闭：保持原有行为，弹出「仅预览类型 / 两种都处理」的询问窗口。
+  const [deleteSiblingsAuto, setDeleteSiblingsAuto] = useState(true)
+  const [exportSiblingsAuto, setExportSiblingsAuto] = useState(true)
 
   // 同名不同类型文件的确认弹窗（导出/删除共用）
   const [siblingModal, setSiblingModal] = useState<SiblingModalState | null>(null)
@@ -129,6 +140,8 @@ export default function MediaRating() {
         if (typeof cfg.includeSubfolders === 'boolean') setIncludeSubfolders(cfg.includeSubfolders)
         if (typeof cfg.isCopyMode === 'boolean') setIsCopyMode(cfg.isCopyMode)
         if (typeof cfg.groupByRating === 'boolean') setGroupByRating(cfg.groupByRating)
+        if (typeof cfg.deleteSiblingsAuto === 'boolean') setDeleteSiblingsAuto(cfg.deleteSiblingsAuto)
+        if (typeof cfg.exportSiblingsAuto === 'boolean') setExportSiblingsAuto(cfg.exportSiblingsAuto)
       }
     })
   }, [])
@@ -140,12 +153,12 @@ export default function MediaRating() {
         const data = res?.data || {}
         api.configWrite?.({
           ...data,
-          mediaRating: { sourcePath, targetPath, includeSubfolders, isCopyMode, groupByRating },
+          mediaRating: { sourcePath, targetPath, includeSubfolders, isCopyMode, groupByRating, deleteSiblingsAuto, exportSiblingsAuto },
         })
       })
     }, 500)
     return () => clearTimeout(t)
-  }, [sourcePath, targetPath, includeSubfolders, isCopyMode, groupByRating])
+  }, [sourcePath, targetPath, includeSubfolders, isCopyMode, groupByRating, deleteSiblingsAuto, exportSiblingsAuto])
 
   const browseFolder = async (type: 'source' | 'target') => {
     const dir = await api.openDirectory()
@@ -375,13 +388,22 @@ export default function MediaRating() {
 
     const extras = await findExtraSiblings(toExport)
     if (extras.length > 0) {
-      const choice = await askSiblingChoice('export', toExport.length, extras)
-      if (choice === null) return
-      if (choice === 'both') {
+      if (exportSiblingsAuto) {
+        // 开关开启：自动一并处理同名不同类型的兄弟文件，
+        // 并按文件类型分子文件夹存放（与选择 both 时一致）。
         finalItems = finalItems.concat(extras.map(s => ({
           path: s.path, name: s.name, relativePath: s.relativePath, ratingLabel: s.repRatingLabel,
         })))
         separateByType = true
+      } else {
+        const choice = await askSiblingChoice('export', toExport.length, extras)
+        if (choice === null) return
+        if (choice === 'both') {
+          finalItems = finalItems.concat(extras.map(s => ({
+            path: s.path, name: s.name, relativePath: s.relativePath, ratingLabel: s.repRatingLabel,
+          })))
+          separateByType = true
+        }
       }
     }
 
@@ -440,18 +462,50 @@ export default function MediaRating() {
     let finalRelPaths = matched.map(f => f.relativePath)
 
     const extras = await findExtraSiblings(matched)
+    let extraCount = 0
     if (extras.length > 0) {
-      const choice = await askSiblingChoice('delete', matched.length, extras)
-      if (choice === null) return
-      if (choice === 'both') {
+      if (deleteSiblingsAuto) {
+        // 开关开启：自动一并删除同名不同类型的兄弟文件，不再弹询问窗口，
+        // 由下方 Modal.confirm 的最终确认（会显示总数与类型明细）承担二次确认职责。
         finalPaths = finalPaths.concat(extras.map(s => s.path))
         finalRelPaths = finalRelPaths.concat(extras.map(s => s.relativePath).filter(Boolean))
+        extraCount = extras.length
+      } else {
+        const choice = await askSiblingChoice('delete', matched.length, extras)
+        if (choice === null) return
+        if (choice === 'both') {
+          finalPaths = finalPaths.concat(extras.map(s => s.path))
+          finalRelPaths = finalRelPaths.concat(extras.map(s => s.relativePath).filter(Boolean))
+          extraCount = extras.length
+        }
       }
     }
 
+    // 汇总最终删除文件里各类型的数量，供二次确认弹窗展示
+    const extCounts = new Map<string, number>()
+    for (const p of finalPaths) {
+      const m = /\.([^./\\]+)$/.exec(p)
+      const ext = m ? m[1].toLowerCase() : '(无扩展名)'
+      extCounts.set(ext, (extCounts.get(ext) || 0) + 1)
+    }
+    const extSummary = [...extCounts.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .map(([ext, n]) => `${ext} × ${n}`)
+      .join(' + ')
+
     Modal.confirm({
       title: `确定删除这 ${finalPaths.length} 个文件？`,
-      content: '文件将移到回收站，可在回收站中恢复。',
+      content: (
+        <div>
+          <div style={{ marginBottom: 6 }}>文件将移到回收站，可在回收站中恢复。</div>
+          <div style={{ color: '#666', fontSize: 12 }}>类型明细：{extSummary}</div>
+          {extraCount > 0 && (
+            <div style={{ color: '#faad14', fontSize: 12, marginTop: 4 }}>
+              其中包含 {extraCount} 个同名不同类型的兄弟文件（例如 <code>5099.jpg</code> 对应的 <code>5099.arw</code>）
+            </div>
+          )}
+        </div>
+      ),
       okText: '删除',
       okType: 'danger',
       cancelText: '取消',
@@ -744,6 +798,12 @@ export default function MediaRating() {
                   </Tooltip>
                   <Switch checked={isCopyMode} onChange={setIsCopyMode} checkedChildren="复制" unCheckedChildren="移动" />
                   <Switch checked={groupByRating} onChange={setGroupByRating} checkedChildren="分文件夹" unCheckedChildren="不分组" />
+                  <Tooltip title="开启后：如检测到同名不同类型的文件（例如 5099.jpg 对应的 5099.arw，哪怕它没被选入预览），会自动一并导出；关闭则弹窗询问">
+                    <Space size={4}>
+                      <span style={{ fontSize: 12, color: '#666' }}>自动一并处理同名兄弟：</span>
+                      <Switch size="small" checked={exportSiblingsAuto} onChange={setExportSiblingsAuto} />
+                    </Space>
+                  </Tooltip>
                   <Button
                     type="primary"
                     icon={isCopyMode ? <CopyOutlined /> : <ScissorOutlined />}
@@ -781,10 +841,16 @@ export default function MediaRating() {
                   <Button danger icon={<DeleteOutlined />} loading={deleting} onClick={doDelete}>
                     删除所选评分的文件
                   </Button>
+                  <Tooltip title="开启后：如检测到同名不同类型的文件（例如 5099.jpg 对应的 5099.arw，哪怕它没被选入预览），会自动一并删除；关闭则弹窗询问">
+                    <Space size={4}>
+                      <span style={{ fontSize: 12, color: '#666' }}>自动一并删除同名兄弟：</span>
+                      <Switch size="small" checked={deleteSiblingsAuto} onChange={setDeleteSiblingsAuto} />
+                    </Space>
+                  </Tooltip>
                 </Space>
                 <div style={{ color: '#999', fontSize: 12 }}>
                   仅删除当前预览的文件（含子目录时按扫描范围），文件会移到回收站，可恢复。
-                  若存在同名不同类型的文件，会询问是否一并删除。
+                  开启「自动一并删除同名兄弟」后，同名不同类型的文件（如 <code>5099.jpg</code> 对应的 <code>5099.arw</code>）会一起删除，即使它们的类型未被选入预览。
                 </div>
               </Space>
             </Card>

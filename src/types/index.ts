@@ -84,6 +84,9 @@ interface ElectronAPI {
     Promise<{ success: boolean; data?: { logPath: string; entries: ImageCopyLogEntry[]; total?: number }; error?: string }>;
   imageCopyAppendLog: (entry: Partial<ImageCopyLogEntry>) => Promise<{ success: boolean }>;
   imageCopyClearLog: () => Promise<{ success: boolean; error?: string }>;
+  // 批量复制图片执行完成后，对有变更的目标路径拉起 TortoiseSVN 提交窗口（预填提交信息，由用户确认提交）
+  svnCommit: (options: { paths: string[]; logMsg?: string }) =>
+    Promise<{ success: boolean; data?: { launched: string[]; errors: string[] }; error?: string }>;
 }
 
 interface ImageCopyOptions {

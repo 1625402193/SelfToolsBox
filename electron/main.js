@@ -71,6 +71,113 @@ function scheduleRawExtract(task) {
   });
 }
 
+// 判断一段数据是否为 JPEG（FF D8 开头）
+function isJpegData(buf) {
+  return !!buf && buf.length > 3 && buf[0] === 0xff && buf[1] === 0xd8;
+}
+
+// 按 TIFF/IFD 结构直接从 RAW 文件里读出内嵌 JPEG。
+// exifr.thumbnail() 对部分机型（尤其是索尼 ARW）拿不到预览，但文件里其实仍内嵌了 JPEG 缩略图/预览图，
+// 位置记录在 IFD 的 JPEGInterchangeFormat(+Length) 或 StripOffsets(+StripByteCounts) 中。
+async function readEmbeddedJpeg(absPath) {
+  const exifr = getExifr();
+  if (!exifr) return null;
+  let out = null;
+  try {
+    out = await exifr.parse(absPath, {
+      tiff: true, ifd0: true, ifd1: true,
+      mergeOutput: false,
+      translateValues: false,
+      reviveValues: false,
+      makerNote: false,
+      userComment: false,
+    }).catch(() => null);
+  } catch (e) {
+    return null;
+  }
+  if (!out) return null;
+
+  const ifds = [out.ifd1, out.ifd0, out.thumbnail, out.ifd2].filter(Boolean);
+  for (const ifd of ifds) {
+    const rawOff = ifd.JPEGInterchangeFormat ?? ifd.StripOffsets ?? ifd[0x0201] ?? ifd[0x0111];
+    const rawLen = ifd.JPEGInterchangeFormatLength ?? ifd.StripByteCounts ?? ifd[0x0202] ?? ifd[0x0117];
+    if (rawOff === undefined || rawLen === undefined) continue;
+    const off = Number(Array.isArray(rawOff) ? rawOff[0] : rawOff);
+    const len = Number(Array.isArray(rawLen) ? rawLen[0] : rawLen);
+    if (!Number.isFinite(off) || !Number.isFinite(len) || off <= 0 || len <= 0 || len > 200 * 1024 * 1024) continue;
+    let fd = null;
+    try {
+      fd = fs.openSync(absPath, 'r');
+      const buffer = Buffer.alloc(len);
+      const read = fs.readSync(fd, buffer, 0, len, off);
+      if (read === len && isJpegData(buffer)) return buffer;
+    } catch (e) {
+      // 该 IFD 指向的不是 JPEG（可能是未压缩的原始像素），继续尝试下一个
+    } finally {
+      if (fd !== null) { try { fs.closeSync(fd); } catch (e) {} }
+    }
+  }
+  return null;
+}
+
+// Windows 系统解码器（WIC）兜底：当内嵌预览缺失、或内嵌数据不是 JPEG 时，
+// 交给系统自带的图像解码器处理（装了相机厂商/微软 RAW 扩展时可解码 ARW、CR3 等）。
+// 解码结果同样是 JPEG，会被缓存，避免重复解码。
+function decodeRawViaWic(absPath) {
+  if (process.platform !== 'win32') return Promise.resolve(null);
+  const { spawn } = require('child_process');
+  ensureRawCacheDir();
+  const tmpOut = path.join(RAW_CACHE_DIR, `wic-${crypto.randomBytes(8).toString('hex')}.jpg`);
+  // 注意：-EncodedCommand 之后不能再附加命令行参数，路径必须内嵌进脚本（单引号做转义）
+  const esc = (s) => String(s).replace(/'/g, "''");
+  const script = `
+$src = '${esc(pathToFileURL(absPath).href)}'
+$dst = '${esc(tmpOut)}'
+Add-Type -AssemblyName PresentationCore
+Add-Type -AssemblyName WindowsBase
+$decoder = [System.Windows.Media.Imaging.BitmapDecoder]::Create([Uri]::new($src), [System.Windows.Media.Imaging.BitmapCreateOptions]::DelayCreation, [System.Windows.Media.Imaging.BitmapCacheOption]::OnDemand)
+$frame = $decoder.Frames[0]
+$w = [double]$frame.PixelWidth
+$h = [double]$frame.PixelHeight
+$scale = 1.0
+if ($w -gt 1600 -or $h -gt 1600) { $scale = 1600 / [Math]::Max($w, $h) }
+$bmp = $frame
+if ($scale -lt 1.0) { $bmp = New-Object System.Windows.Media.Imaging.TransformedBitmap($frame, (New-Object System.Windows.Media.ScaleTransform($scale, $scale))) }
+$enc = New-Object System.Windows.Media.Imaging.JpegBitmapEncoder
+$enc.QualityLevel = 90
+$enc.Frames.Add([System.Windows.Media.Imaging.BitmapFrame]::Create($bmp))
+$fs = [System.IO.File]::Open($dst, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write)
+$enc.Save($fs)
+$fs.Dispose()
+`;
+  const encoded = Buffer.from(script, 'utf16le').toString('base64');
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (buf) => { if (done) return; done = true; resolve(buf); };
+    try {
+      const child = spawn('powershell', [
+        '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+        '-EncodedCommand', encoded,
+      ], { shell: false, stdio: 'ignore', windowsHide: true });
+      const timer = setTimeout(() => { try { child.kill(); } catch (e) {} finish(null); }, 30000);
+      child.on('error', () => { clearTimeout(timer); finish(null); });
+      child.on('close', () => {
+        clearTimeout(timer);
+        try {
+          if (fs.existsSync(tmpOut)) {
+            const data = fs.readFileSync(tmpOut);
+            try { fs.unlinkSync(tmpOut); } catch (e) {}
+            if (isJpegData(data)) return finish(data);
+          }
+        } catch (e) {}
+        finish(null);
+      });
+    } catch (e) {
+      finish(null);
+    }
+  });
+}
+
 // 提取 RAW 内嵌 JPEG，返回缓存文件路径
 async function extractRawPreview(absPath) {
   const exifr = getExifr();
@@ -95,33 +202,23 @@ async function extractRawPreview(absPath) {
       return cacheFile;
     }
 
-    // 优先取大尺寸 preview，没有再退到 thumbnail
+    // 三级回退提取预览，每一级都校验 JPEG 文件头（FF D8），
+    // 避免把非 JPEG 数据（如未压缩的原始像素）写成 .jpg 导致浏览器无法预览
     let buf = null;
+
+    // 1) exifr 内嵌缩略图
     try {
-      // exifr.thumbnail() 返回 Uint8Array（小预览）
-      // 优先尝试 parse 拿全尺寸 preview
-      const out = await exifr.parse(absPath, {
-        tiff: true, ifd0: true, ifd1: true,
-        mergeOutput: false,
-        translateValues: false,
-        reviveValues: false,
-        makerNote: false,
-        userComment: false,
-      }).catch(() => null);
-      // ifd1 / SubIFDs 中可能包含 JPEGInterchangeFormat / StripOffsets 指向大预览
-      // exifr 已经在某些 RAW 上自动暴露 preview / jpeg buffer，但 API 不稳定
-      // 这里先直接用 thumbnail 作为兜底，多数相机的 thumbnail 已 1024+ 宽够用
-      void out;
+      const t = await exifr.thumbnail(absPath);
+      if (isJpegData(t)) buf = Buffer.from(t);
     } catch (e) {}
 
-    if (!buf) {
-      try {
-        const t = await exifr.thumbnail(absPath);
-        if (t && t.byteLength > 0) buf = Buffer.from(t);
-      } catch (e) {}
-    }
+    // 2) 按 IFD 结构直读内嵌 JPEG（索尼 ARW 等机型 thumbnail() 取不到时走这条路）
+    if (!buf) buf = await readEmbeddedJpeg(absPath);
 
-    if (!buf || buf.length === 0) throw new Error('未提取到内嵌预览图');
+    // 3) Windows 系统解码器（WIC）兜底，系统装了对应 RAW 编解码器时可解码
+    if (!buf) buf = await decodeRawViaWic(absPath);
+
+    if (!buf || buf.length === 0) throw new Error('未提取到可用预览图（无内嵌预览且系统解码器也无法解码）');
     fs.writeFileSync(cacheFile, buf);
     return cacheFile;
   });
@@ -1394,6 +1491,60 @@ function normalizeWcPath(p) {
   return s;
 }
 
+// 拉起 TortoiseSVN 提交窗口（批量复制图片执行完成后使用）
+// 不自动提交：打开提交对话框并预填提交信息，由用户在窗口中确认后提交
+// /closeonend:0 = 无论提交成功与否都不自动关闭窗口，保留结果供用户查看
+ipcMain.handle('svn:commit', async (_event, options) => {
+  const opts = options || {};
+  const rawPaths = Array.isArray(opts.paths) ? opts.paths : [];
+  const logMsg = typeof opts.logMsg === 'string' && opts.logMsg.trim()
+    ? opts.logMsg.trim().replace(/\s+/g, ' ')
+    : '批量复制图片（多功能工具箱）';
+  if (rawPaths.length === 0) {
+    return { success: false, error: '没有需要拉起提交的目标路径' };
+  }
+
+  const { spawn } = require('child_process');
+  const launched = [];
+  const errors = [];
+  for (const raw of rawPaths) {
+    const dirPath = normalizeWcPath(raw);
+    if (!dirPath || !fs.existsSync(dirPath)) {
+      errors.push(`${raw}: 路径不存在`);
+      continue;
+    }
+    if (!fs.existsSync(path.join(dirPath, '.svn'))) {
+      errors.push(`${dirPath}: 不是 SVN 工作副本（未找到 .svn 目录）`);
+      continue;
+    }
+
+    const ok = await new Promise((resolve) => {
+      let spawnErr = null;
+      try {
+        const child = spawn(
+          'TortoiseProc.exe',
+          ['/command:commit', `/path:${dirPath}`, `/logmsg:${logMsg}`, '/closeonend:0'],
+          { shell: false, detached: true, stdio: 'ignore' }
+        );
+        child.on('error', (e) => { spawnErr = e; });
+        child.unref();
+      } catch (e) {
+        spawnErr = e;
+      }
+      // spawn 的 error 事件是异步触发的，稍等确认没有启动错误即可；提交窗口保持独立打开，不等待其关闭
+      setTimeout(() => resolve(!spawnErr), 800);
+    });
+    if (ok) launched.push(dirPath);
+    else errors.push(`${dirPath}: 启动 TortoiseProc.exe 失败，请确认已安装 TortoiseSVN`);
+    // 多个目标路径间隔 1.5 秒依次拉起，避免提交窗口集中弹出
+    await new Promise((r) => setTimeout(r, 1500));
+  }
+  if (launched.length === 0) {
+    return { success: false, error: errors.join('\n') || '未能拉起任何提交窗口' };
+  }
+  return { success: true, data: { launched, errors } };
+});
+
 // 执行 SVN Update（使用 TortoiseSVN 窗口程序）
 // TortoiseProc.exe 是 GUI 程序，启动后会立即返回，需要通过轮询 wmic 检测其窗口进程是否结束
 ipcMain.handle('svn:update', async (_event, rawDirPath) => {
@@ -1766,13 +1917,15 @@ ipcMain.handle('media:saveRatings', async (_event, dirPath, ratings) => {
 // rootDir 用于计算返回文件的 relativePath（与 media:scan 保持一致，便于前端按 relativePath 清理评分）。
 ipcMain.handle('media:findSiblings', async (_event, rootDir, items) => {
   try {
+    // 规范化目录键：统一分隔符 + 小写（Windows 大小写不敏感），与前端 normDir/siblingKey 保持一致
+    const normDir = (d) => String(d || '').replace(/[\\/]+$/, '').replace(/\\/g, '/').toLowerCase();
     const dirCache = new Map();
     const result = {};
     for (const item of items || []) {
       const dir = item && item.dir;
       const baseName = item && item.baseName;
       if (!dir || !baseName) continue;
-      const key = `${dir}||${baseName.toLowerCase()}`;
+      const key = `${normDir(dir)}||${baseName.toLowerCase()}`;
       if (result[key]) continue;
 
       let entries = dirCache.get(dir);
@@ -3012,6 +3165,25 @@ ipcMain.handle('imageCopy:execute', async (_event, options) => {
     const { plan, scan } = imageCopyState;
     if (!plan) return { success: false, error: '尚未生成复制计划' };
 
+    // 兜底校验：源路径与目标路径重叠（相同或互为父子）时，目标索引会把源文件自身也索引进去，
+    // 复制时就会出现「文件复制到自己」——Windows 下会先把目标（即源）截断，导致源文件内容丢失。
+    // 这种情况直接拒绝执行，避免误删用户素材。
+    {
+      const norm = (p) => String(p || '').trim().replace(/[\\/]+$/, '').replace(/\\/g, '/').toLowerCase();
+      const srcRoots = (scan?.sourcePaths || []).map(norm).filter(Boolean);
+      const tgtRoots = (plan.roots || []).map(r => norm(r && r.root)).filter(Boolean);
+      for (const s of srcRoots) {
+        for (const t of tgtRoots) {
+          if (s === t || t.startsWith(s + '/') || s.startsWith(t + '/')) {
+            return {
+              success: false,
+              error: `源路径与目标路径重叠（源：${s}，目标：${t}）。继续执行会导致源文件被自身覆盖而丢失，请修改路径后重试。`,
+            };
+          }
+        }
+      }
+    }
+
     const logs = [];
     // 仅为确实存在未匹配图片的目标路径创建文件夹
     const planned = resolveUnmatchedDirs(plan, scan, opts.unmatchedFolderName);
@@ -3042,6 +3214,17 @@ ipcMain.handle('imageCopy:execute', async (_event, options) => {
     for (const t of tasks) {
       const destPath = path.join(t.destDir, t.name);
       try {
+        // 单个任务兜底：源与目标完全相同时复制会清空文件内容，必须跳过
+        if (path.resolve(t.src) === path.resolve(destPath)) {
+          failed++;
+          bump(t.root, 'failed');
+          logs.push({
+            action: 'sameFile', level: 'error',
+            message: `跳过：源文件与目标文件是同一个文件，复制会导致内容丢失：${destPath}`,
+            detail: { root: t.root, src: t.src, destPath },
+          });
+          continue;
+        }
         const exists = fs.existsSync(destPath);
         if (exists) {
           // 内容完全相同时无需复制，也不必询问

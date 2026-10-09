@@ -131,6 +131,8 @@ export default function ImageCopy() {
   const [minSegments, setMinSegments] = useState(1)
   // 同名且内容一致（大小 + MD5）时自动跳过，不询问
   const [skipSameContent, setSkipSameContent] = useState(true)
+  // 执行完成后，对有变更的目标路径依次拉起 TortoiseSVN 提交窗口（预填提交信息，由用户确认提交）
+  const [svnCommitAfter, setSvnCommitAfter] = useState(false)
   // 尺寸非 2 的倍数时的处理方式：ask 逐张询问 / include 全部复制 / exclude 全部不复制
   const [oddSizePolicy, setOddSizePolicy] = useState<'ask' | 'include' | 'exclude'>('ask')
   // 是否把尺寸异常图额外复制一份到「尺寸异常」文件夹备查
@@ -195,6 +197,29 @@ export default function ImageCopy() {
     setTargetPaths(next)
     setDisabledTargets(prev => next.map((_, i) => prev[i] ?? false))
   }
+
+  /** 路径规范化用于比较：去掉末尾分隔符、统一斜杠、转小写（Windows 路径不区分大小写） */
+  const normPath = (p: string) => String(p || '').trim()
+    .replace(/[\\/]+$/, '')
+    .replace(/\\/g, '/')
+    .toLowerCase()
+
+  /** 校验源路径与目标路径是否重叠（相同或互为父子目录）。
+   *  重叠时目标索引会把源文件自身也索引进来，复制时即「文件复制到自己」，
+   *  Windows 下会先把目标（也就是源）截断，导致源文件内容丢失，必须禁止执行。 */
+  const checkPathOverlap = () => {
+    const srcs = sourcePaths.map(normPath).filter(Boolean)
+    const tgts = activeTargets().map(normPath).filter(Boolean)
+    for (const s of srcs) {
+      for (const t of tgts) {
+        if (s === t) return `源路径与目标路径不能相同：${s}`
+        if (t.startsWith(`${s}/`)) return `目标路径不能位于源路径内部：目标「${t}」在源路径「${s}」之下`
+        if (s.startsWith(`${t}/`)) return `源路径不能位于目标路径内部：源路径「${s}」在目标路径「${t}」之下`
+      }
+    }
+    return ''
+  }
+  const pathOverlapError = checkPathOverlap()
 
   // ---------- 日志 ----------
   const pushLogs = (entries: ImageCopyLogEntry[] | ImageCopyLogEntry) => {
@@ -264,6 +289,7 @@ export default function ImageCopy() {
           if (typeof saved.enableSizeFallback === 'boolean') setEnableSizeFallback(saved.enableSizeFallback)
           if (typeof saved.preferMostFiles === 'boolean') setPreferMostFiles(saved.preferMostFiles)
           if (typeof saved.skipSameContent === 'boolean') setSkipSameContent(saved.skipSameContent)
+          if (typeof saved.svnCommitAfter === 'boolean') setSvnCommitAfter(saved.svnCommitAfter)
           if (typeof saved.suffixWordsText === 'string') setSuffixWordsText(saved.suffixWordsText)
           if (typeof saved.minSegments === 'number') setMinSegments(saved.minSegments)
           if (saved.oddSizePolicy === 'ask' || saved.oddSizePolicy === 'include' || saved.oddSizePolicy === 'exclude') {
@@ -304,7 +330,7 @@ export default function ImageCopy() {
             enableExactName, enableSuffixMatch, enablePrefixMatch, enableSizeFallback,
             preferMostFiles, skipSameContent, suffixWordsText, minSegments,
             oddSizePolicy, copyOddSizeToFolder,
-            oddSizeFolderName, unmatchedFolderName,
+            oddSizeFolderName, unmatchedFolderName, svnCommitAfter,
           },
         })
       } catch {}
@@ -312,7 +338,7 @@ export default function ImageCopy() {
     return () => clearTimeout(timer)
   }, [sourcePaths, targetPaths, disabledTargets, recursive, autoRebuildIndex, askOverwrite,
       enableExactName, enableSuffixMatch, enablePrefixMatch, enableSizeFallback,
-      preferMostFiles, skipSameContent, suffixWordsText, minSegments,
+      preferMostFiles, skipSameContent, suffixWordsText, minSegments, svnCommitAfter,
       oddSizePolicy, copyOddSizeToFolder, oddSizeFolderName, unmatchedFolderName])
 
   // ---------- 记录工具创建的文件夹，供界面快捷打开 ----------
@@ -323,6 +349,11 @@ export default function ImageCopy() {
 
   // ---------- 步骤 1：重建目标索引（每个目标路径分别建立，互相独立） ----------
   const buildIndex = async (silent = false): Promise<ImageIndexData | null> => {
+    if (pathOverlapError) {
+      message.error(pathOverlapError)
+      logAction({ action: 'buildIndex', level: 'error', message: `重建索引中止（路径重叠）：${pathOverlapError}` })
+      return null
+    }
     const valid = activeTargets()
     if (valid.length === 0) {
       message.warning(disabledTargets.some(Boolean)
@@ -486,6 +517,12 @@ export default function ImageCopy() {
   // ---------- 完整流程 ----------
   const runFullFlow = async () => {
     if (sourcePaths.map(p => p.trim()).filter(Boolean).length === 0) return message.warning('请至少选择一个源路径')
+    // 源路径与目标路径重叠会导致源文件被复制到自身而丢失，直接拒绝执行
+    if (pathOverlapError) {
+      message.error(pathOverlapError)
+      logAction({ action: 'flow', level: 'error', message: `流程中止（路径重叠）：${pathOverlapError}` })
+      return
+    }
     setRunning(true)
     try {
       logAction({ action: 'flow', level: 'info', message: '===== 开始执行批量复制流程 =====' })
@@ -644,6 +681,34 @@ export default function ImageCopy() {
           onOk: () => api.openPath(unmatchedDirs[0][1]),
         })
       }
+
+      // 8. 可选：对本次有新增/替换变更的目标路径，依次拉起 TortoiseSVN 提交窗口（预填提交信息，由用户确认提交）
+      if (svnCommitAfter) {
+        const changedRoots = (res.data.perRoot || [])
+          .filter(r => (r.copied ?? 0) + (r.overwritten ?? 0) > 0)
+          .map(r => r.root)
+        if (changedRoots.length === 0) {
+          pushLogs({ action: 'flow', level: 'info', message: '本次没有新增/替换的文件变更，未拉起 SVN 提交窗口' })
+        } else {
+          pushLogs({ action: 'flow', level: 'info', message: `开始拉起 ${changedRoots.length} 个目标路径的 SVN 提交窗口（依次弹出，请在窗口中确认提交）` })
+          const svnRes = await api.svnCommit?.({
+            paths: changedRoots,
+            logMsg: `批量复制图片 ${new Date().toLocaleString('zh-CN')}`,
+          })
+          if (svnRes?.success) {
+            for (const p of svnRes.data?.launched || []) {
+              pushLogs({ action: 'flow', level: 'success', message: `已拉起 SVN 提交窗口：${p}` })
+            }
+            for (const e of svnRes.data?.errors || []) {
+              pushLogs({ action: 'flow', level: 'error', message: `SVN 提交拉起失败：${e}` })
+            }
+            message.info(`已拉起 ${svnRes.data?.launched.length ?? 0} 个目标路径的 SVN 提交窗口，请逐个确认提交`)
+          } else {
+            pushLogs({ action: 'flow', level: 'error', message: `SVN 提交拉起失败：${svnRes?.error || '未知错误'}` })
+            message.error(svnRes?.error || '拉起 SVN 提交失败')
+          }
+        }
+      }
     } finally {
       setRunning(false)
     }
@@ -748,6 +813,16 @@ export default function ImageCopy() {
         />
       </Card>
 
+      {pathOverlapError && (
+        <Alert
+          type="error"
+          showIcon
+          message="源路径与目标路径重叠，已禁止执行"
+          description={`${pathOverlapError}。重叠会让目标索引包含源文件自身，复制时等同于「文件复制到自己」，会导致源文件内容被清空丢失。请修改源路径或目标路径后重试。`}
+          style={{ marginBottom: 12 }}
+        />
+      )}
+
       <Card size="small" className="section-card" title="选项">
         <Space size="large" wrap>
           <Space>包含子文件夹：<Switch checked={recursive} onChange={setRecursive} /></Space>
@@ -768,6 +843,12 @@ export default function ImageCopy() {
               <span>内容相同自动跳过：</span>
             </Tooltip>
             <Switch checked={skipSameContent} onChange={setSkipSameContent} />
+          </Space>
+          <Space size={4}>
+            <Tooltip title="执行完成后，对本次有新增/替换变更的每个目标路径依次拉起 TortoiseSVN 提交窗口，预填提交信息，由你确认后提交（不会自动提交）。跳过未变更/未启用的目标路径。">
+              <span>完成后拉起 SVN 提交：</span>
+            </Tooltip>
+            <Switch checked={svnCommitAfter} onChange={setSvnCommitAfter} />
           </Space>
         </Space>
       </Card>
